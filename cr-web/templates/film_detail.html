@@ -1,0 +1,902 @@
+{% extends "base.html" %}
+
+{% block title %}{{ film.title }}{% match film.year %}{% when Some with (y) %} ({{ y }}){% when None %}{% endmatch %} — film online{% endblock %}
+
+{% block meta_description %}{% match film.description %}{% when Some with (d) %}{{ d }}{% when None %}{{ film.title }}{% match film.year %}{% when Some with (y) %} ({{ y }}){% when None %}{% endmatch %} — sledujte online na ceskarepublika.wiki{% endmatch %}{% endblock %}
+
+{% block og_title %}{{ film.title }}{% match film.year %}{% when Some with (y) %} ({{ y }}){% when None %}{% endmatch %} — film online{% endblock %}
+{% block og_description %}{% match film.description %}{% when Some with (d) %}{{ d }}{% when None %}{{ film.title }}{% match film.year %}{% when Some with (y) %} ({{ y }}){% when None %}{% endmatch %} — sledujte online zdarma na ceskarepublika.wiki{% endmatch %}{% endblock %}
+{% block og_image %}http://localhost:3000/filmy-online/{{ film.slug }}-large.{{ film.large_url_ext() }}{% endblock %}
+{% block og_type %}video.movie{% endblock %}
+
+{# Portrait poster dimensions (780×1170, 2:3 aspect) trigger Discord's
+   "movie card" layout — cover on the LEFT, title/description on the RIGHT.
+   Without these overrides the page inherits the default landscape 1200×630
+   card dimensions and Discord renders the cover as a tiny top-right thumbnail. #}
+{% block og_extra %}
+<meta property="og:image:type" content="image/{% if film.large_url_ext() == "jpg" %}jpeg{% else %}{{ film.large_url_ext() }}{% endif %}">
+<meta property="og:image:width" content="780">
+<meta property="og:image:height" content="1170">
+<meta property="og:image:alt" content="{{ film.title }}{% match film.year %}{% when Some with (y) %} ({{ y }}){% when None %}{% endmatch %}">
+<meta property="og:site_name" content="ceskarepublika.wiki">
+{# Override base.html's summary_large_image — portrait `summary` card
+   renders as small left thumbnail + text on right, which is what we want
+   for a film poster. Later tag overrides earlier on Discord/Slack scrapers. #}
+<meta name="twitter:card" content="summary">
+{% endblock %}
+
+{% block leaflet %}{% endblock %}
+
+{% block head %}
+<link rel="icon" type="image/svg+xml" href="/static/img/logo-filmy-a-serialy.svg?v=6">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+<meta property="og:url" content="http://localhost:3000/filmy-online/{{ film.slug }}/">
+{% endblock %}
+
+{% block header_left %}
+<div class="logo-group" style="display:flex;align-items:center;gap:0.5rem;">
+    <a href="/filmy-online/" style="display:flex;align-items:center;text-decoration:none;">
+        <img src="/static/img/logo-filmy-a-serialy.svg?v=6"
+            alt="Logo Filmy online" title="Filmy online" class="header-emblem">
+    </a>
+    <h1>{{ film.title }}</h1>
+</div>
+{% endblock %}
+
+{# Search in header — same as listing page #}
+{% block header_search %}
+<div class="search-container" id="header-search-box">
+    <input type="text" id="film-search" class="search-input" placeholder="Hledat film..." autocomplete="off">
+    <button class="search-btn" onclick="doSearch()">Hledat</button>
+    <div id="search-results" class="search-dropdown"></div>
+</div>
+{% endblock %}
+
+{% block header_right %}<div class="context-emblem"></div>{% endblock %}
+
+{% block content %}
+<main class="film-detail-page">
+    <nav class="breadcrumb">
+        <a href="/">Česká republika</a>
+        <span>›</span> <a href="/filmy-online/">Filmy online</a>
+        <span>›</span> <span>{{ film.title }}</span>
+    </nav>
+
+    {# Video player section — always shown. Player sources come from the
+       unified `video_sources` table via `video_sources_for_badges`. #}
+    <div class="player-section">
+        {# Provider tabs are numbered (1 = sktorrent, 2 = prehraj.to, 3 = sledujteto).
+           Visible label is just the number so the tab stays compact; the
+           accessible name (`aria-label`) spells out the provider for screen
+           readers. Rendering is driven by which providers have at least one
+           row in `video_sources_for_badges` — the unified source of truth —
+           so the tabs never drift from the list below. #}
+        <div class="source-tabs" id="source-tabs">
+            {% if has_source_sktorrent %}
+            <button class="source-tab source-tab-sktorrent active" data-provider="sktorrent" onclick="onTabClick(this)" aria-label="Zdroj 1: online.sktorrent.eu">1</button>
+            {% endif %}
+            {% if has_source_prehrajto %}
+            <button class="source-tab source-tab-prehrajto{% if !has_source_sktorrent %} active{% endif %}" data-provider="prehrajto" onclick="onTabClick(this)" aria-label="Zdroj 2: Přehraj.to">2</button>
+            {% endif %}
+            {% if has_source_sledujteto %}
+            <button class="source-tab source-tab-sledujteto{% if !has_source_sktorrent && !has_source_prehrajto %} active{% endif %}" data-provider="sledujteto" onclick="onTabClick(this)" aria-label="Zdroj 3: sledujteto.cz">3</button>
+            {% endif %}
+        </div>
+
+        {# Video player — auto-select best available quality #}
+        <div class="player-panel">
+            <video id="film-player" controls preload="metadata" poster="/filmy-online/{{ film.slug }}.webp" width="100%">
+            </video>
+            <div class="player-controls">
+                {% match film.sktorrent_video_id %}
+                {% when Some with (vid) %}
+                <div class="player-quality" id="sktorrent-quality">
+                </div>
+                {% when None %}
+                {% endmatch %}
+                <div id="subtitle-controls" class="subtitle-controls" style="display:none;">
+                    <span class="sub-label">Velikost titulků</span>
+                    <select id="sub-size-select" class="sub-select" onchange="setSubSize(this.value)">
+                        <option value="14">14 px</option>
+                        <option value="16">16 px</option>
+                        <option value="18">18 px</option>
+                        <option value="20" selected>20 px</option>
+                        <option value="24">24 px</option>
+                        <option value="28">28 px</option>
+                        <option value="32">32 px</option>
+                        <option value="36">36 px</option>
+                        <option value="40">40 px</option>
+                    </select>
+                </div>
+                <div id="source-status" class="source-status"></div>
+            </div>
+        </div>
+
+        {# SK Torrent video id only — CDN + qualities are resolved live via
+           /api/films/sktorrent-resolve at play time, because SK Torrent rotates
+           videos across online{N}.sktorrent.eu CDN servers and any stored CDN
+           value goes stale. #}
+        {% match film.sktorrent_video_id %}
+        {% when Some with (vid) %}
+        <script>
+        var sktorrentVideoId = {{ vid }};
+        </script>
+        {% when None %}
+        {% endmatch %}
+    </div>
+
+    <div class="film-hero">
+        <div class="film-cover">
+            <div class="cover-zoom" data-gallery-open="film" data-index="0"
+                 data-gallery-photos="[&quot;/filmy-online/{{ film.slug }}-large.{{ film.large_url_ext() }}&quot;]"
+                 title="Zobrazit větší obrázek">
+                <img src="/filmy-online/{{ film.slug }}.webp" alt="{{ film.title }}" width="200" height="300">
+                <span class="zoom-icon" aria-hidden="true">&#128269;</span>
+            </div>
+        </div>
+
+        <div class="film-meta">
+            <h2>{{ film.title }}{% match film.year %}{% when Some with (y) %} <span class="year">({{ y }})</span>{% when None %}{% endmatch %}</h2>
+
+            {% match film.original_title %}
+            {% when Some with (ot) %}
+            <p class="original-title">{{ ot }}</p>
+            {% when None %}
+            {% endmatch %}
+
+            <div class="meta-row">
+                {# Rating chips on the detail link out to the source database when an
+                   external id is set (TMDB → themoviedb.org/movie/{id}, IMDb →
+                   imdb.com/title/{ttid}, ČSFD → csfd.cz/film/{id}). All external
+                   links carry rel="nofollow noopener" so the SEO juice stays on
+                   ceskarepublika.wiki. Vote-count suffix lets the visitor judge
+                   how representative the rating is. #}
+                {% match film.tmdb_rating %}
+                {% when Some with (r) %}
+                    {% match film.tmdb_id %}
+                    {% when Some with (tid) %}
+                <a class="meta-badge tmdb" href="https://www.themoviedb.org/movie/{{ tid }}" target="_blank" rel="nofollow noopener" title="Otevřít na TMDB">TMDB {{ "{:.1}"|format(r) }}{% match film.tmdb_vote_count %}{% when Some with (vc) %} · {{ vc }} hodnocení{% when None %}{% endmatch %}</a>
+                    {% when None %}
+                <span class="meta-badge tmdb" title="TMDB hodnocení">TMDB {{ "{:.1}"|format(r) }}{% match film.tmdb_vote_count %}{% when Some with (vc) %} · {{ vc }} hodnocení{% when None %}{% endmatch %}</span>
+                    {% endmatch %}
+                {% when None %}
+                {% endmatch %}
+
+                {% match film.imdb_rating %}
+                {% when Some with (r) %}
+                    {% match film.imdb_id %}
+                    {% when Some with (iid) %}
+                <a class="meta-badge imdb" href="https://www.imdb.com/title/{{ iid }}/" target="_blank" rel="nofollow noopener" title="Otevřít na IMDb">IMDb {{ "{:.1}"|format(r) }}{% match film.imdb_votes %}{% when Some with (vc) %} · {{ vc }} hodnocení{% when None %}{% endmatch %}</a>
+                    {% when None %}
+                <span class="meta-badge imdb" title="IMDb hodnocení">IMDb {{ "{:.1}"|format(r) }}{% match film.imdb_votes %}{% when Some with (vc) %} · {{ vc }} hodnocení{% when None %}{% endmatch %}</span>
+                    {% endmatch %}
+                {% when None %}
+                {% endmatch %}
+
+                {# ČSFD chip (#764) — hidden when fewer than 5 users rated (raw %
+                   from one or two voters is misleading, e.g. "1 person rated this
+                   100%"). #}
+                {% match film.csfd_rating %}
+                {% when Some with (r) %}
+                    {% if film.csfd_rating_count.unwrap_or(0) >= 5 %}
+                        {% match film.csfd_id %}
+                        {% when Some with (cid) %}
+                <a class="meta-badge csfd" href="https://www.csfd.cz/film/{{ cid }}/" target="_blank" rel="nofollow noopener" title="Otevřít na ČSFD">ČSFD {{ r }}% · {{ film.csfd_rating_count.unwrap_or(0) }} hodnocení</a>
+                        {% when None %}
+                <span class="meta-badge csfd" title="ČSFD hodnocení">ČSFD {{ r }}% · {{ film.csfd_rating_count.unwrap_or(0) }} hodnocení</span>
+                        {% endmatch %}
+                    {% endif %}
+                {% when None %}
+                {% endmatch %}
+
+                {# Fallback when no rating source has a value (#593 acceptance criterion). #}
+                {% if film.tmdb_rating.is_none() && film.imdb_rating.is_none() && film.csfd_rating.is_none() %}
+                <span class="meta-badge none">Bez hodnocení</span>
+                {% endif %}
+
+                {% match film.runtime_min %}
+                {% when Some with (m) %}
+                <span class="meta-badge runtime">{{ m }} min</span>
+                {% when None %}
+                {% endmatch %}
+            </div>
+
+            {% if !genres.is_empty() %}
+            <div class="genre-tags">
+                {% for g in genres %}
+                <a href="/filmy-online/{{ g.slug }}/" class="genre-tag">{{ g.name_cs }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% match film.description %}
+            {% when Some with (d) %}
+            <div class="film-description">
+                <p>{{ d }}</p>
+            </div>
+            {% when None %}
+            {% endmatch %}
+        </div>
+    </div>
+
+    {# Unified source list. One row per alive `video_sources` entry, ordered
+       by provider priority then is_primary DESC. Each row has a colored
+       left stripe by provider; the currently-playing row gets a gold
+       background (`.active`) and clicking a row switches the player. #}
+    {% if !video_sources_for_badges.is_empty() %}
+    <div class="sources-section" id="sources-section">
+        <h3>Zdroje</h3>
+        <div class="sources-list" id="sources-list">
+            {% for vs in video_sources_for_badges %}
+            <div class="source-row source-row-{{ vs.provider_slug }}{% if vs.is_primary %} is-primary{% endif %}"
+                 data-provider="{{ vs.provider_slug }}"
+                 data-external-id="{{ vs.external_id }}"
+                 data-playback-id="{{ vs.playback_id }}"
+                 role="button"
+                 tabindex="0"
+                 onclick="playSource(this)"
+                 onkeydown="onSourceRowKeydown(event, this)">
+                <div class="source-row-main">
+                    {% match vs.title %}
+                    {% when Some with (t) %}
+                    <span class="source-row-title">{{ t }}</span>
+                    {% when None %}
+                    {# Fallback to the film's own title (typically from TMDB).
+                       sktorrent rows don't carry an upload-specific title;
+                       without this fallback the row would just say "(bez názvu)"
+                       and give the user nothing to anchor on. #}
+                    <span class="source-row-title">{{ film.title }}{% match film.year %}{% when Some with (y) %} ({{ y }}){% when None %}{% endmatch %}</span>
+                    {% endmatch %}
+                    <span class="source-row-badges">
+                        {# Only show the audio chip when we actually know the
+                           language — a bare "🎧 —" is visual noise. #}
+                        {% if vs.audio_lang.is_some() %}
+                        <span class="source-row-audio" title="Jazyk zvuku">🎧 {{ vs.audio_label() }}{% match vs.confidence_display() %}{% when Some with (c) %} <span class="confidence">({{ c }})</span>{% when None %}{% endmatch %}</span>
+                        {% endif %}
+                        {% if !vs.subtitle_langs.is_empty() %}
+                        <span class="source-row-subs" title="Titulky">📝 {{ vs.subtitle_display() }}</span>
+                        {% endif %}
+                        {% match vs.resolution_hint %}
+                        {% when Some with (r) %}
+                        <span class="source-row-res">{{ r }}</span>
+                        {% when None %}
+                        {% endmatch %}
+                        {% if vs.is_primary %}
+                        <span class="source-row-primary" title="Primární zdroj">primary</span>
+                        {% endif %}
+                    </span>
+                </div>
+                <span class="source-row-play" aria-hidden="true">&#9654;</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if !creators.is_empty() %}
+    <section class="crew-section">
+        <h3>Tvůrci</h3>
+        <div class="people-row">
+            {% for p in creators %}
+            <div class="person-card">
+                {% match p.profile_filename %}
+                {% when Some with (f) %}
+                <img class="person-photo" src="/filmy-online/person/{{ f }}?v=2" alt="{{ p.name }}" title="{{ p.name }}" loading="lazy">
+                {% when None %}
+                <div class="person-photo placeholder">{{ p.name }}</div>
+                {% endmatch %}
+                <span class="person-name">{{ p.name }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {% if !actors.is_empty() %}
+    <section class="crew-section">
+        <h3>Herci</h3>
+        <div class="people-row">
+            {% for p in actors %}
+            <div class="person-card">
+                {% match p.profile_filename %}
+                {% when Some with (f) %}
+                <img class="person-photo" src="/filmy-online/person/{{ f }}?v=2" alt="{{ p.name }}" title="{{ p.name }}" loading="lazy">
+                {% when None %}
+                <div class="person-photo placeholder">{{ p.name }}</div>
+                {% endmatch %}
+                <span class="person-name" title="{{ p.name }}">{{ p.name }}</span>
+                {% match p.character_name %}{% when Some with (c) %}<span class="person-char" title="{{ c }}">{{ c }}</span>{% when None %}{% endmatch %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+</main>
+
+<style>
+.film-detail-page { max-width: 960px; margin: 0 auto; padding: 1rem; }
+
+/* Search dropdown — override base overflow:hidden */
+#header-search-box { position: relative; overflow: visible !important; }
+.search-dropdown { display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: white; border: 1px solid #ddd; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.18); z-index: 200; max-height: 420px; overflow-y: auto; }
+.search-dropdown.open { display: block; }
+.search-item { display: flex; align-items: center; gap: 0.7rem; padding: 0.5rem 0.8rem; text-decoration: none; color: inherit; border-bottom: 1px solid #f0f0f0; transition: background 0.15s; }
+.search-item:last-child { border-bottom: none; }
+.search-item:hover { background: #f5f5f5; }
+.search-item img { width: 40px; height: 60px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.search-item .si-placeholder { width: 40px; height: 60px; background: #eee; border-radius: 4px; flex-shrink: 0; }
+.search-item .si-info { flex: 1; min-width: 0; }
+.search-item .si-title { font-weight: 500; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-item .si-meta { font-size: 0.8rem; color: #888; display: flex; gap: 0.25rem; align-items: center; }
+.search-item .si-rating { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.72rem; font-weight: 700; }
+.search-item .si-rating.tmdb { background: #01b4e4; color: #fff; }
+.search-item .si-rating.imdb { background: #f5c518; color: #000; }
+
+/* Breadcrumb */
+.breadcrumb { font-size: 0.85rem; color: #888; margin-bottom: 1.2rem; }
+.breadcrumb a { color: #11457E; text-decoration: none; }
+.breadcrumb a:hover { text-decoration: underline; }
+
+/* Player section */
+.player-section { margin-bottom: 1.5rem; }
+/* Numbered provider tabs. Each tab shows just a digit (1/2/3); the
+   active tab gets the provider's accent color so the number visually
+   maps to the colored stripe on each row in the Zdroje list below. */
+.source-tabs { display: flex; flex-wrap: wrap; gap: 0.4rem; background: #1a1a1a; padding: 0.5rem 0.6rem; border-radius: 10px 10px 0 0; }
+.source-tab {
+    background: #333; color: #ccc; border: none;
+    width: 2rem; height: 2rem; border-radius: 50%;
+    cursor: pointer; font-size: 0.95rem; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, transform 0.15s;
+}
+.source-tab:hover { background: #444; color: #fff; transform: scale(1.05); }
+.source-tab.active.source-tab-sktorrent { background: #11457E; color: #fff; }
+.source-tab.active.source-tab-prehrajto { background: #D7141A; color: #fff; }
+.source-tab.active.source-tab-sledujteto { background: #C5A059; color: #1a1a1a; }
+.source-tab.loading { background: #555; cursor: wait; }
+.player-panel { background: #000; border-radius: 0 0 10px 10px; overflow: hidden; }
+.player-panel video { display: block; width: 100%; max-height: 540px; background: #000; }
+.player-controls { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; background: #111; }
+.player-quality { display: flex; gap: 0.3rem; }
+.quality-btn { background: #333; color: #ccc; border: none; padding: 0.25rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+.quality-btn:hover { background: #444; }
+.quality-btn.active { background: #D7141A; color: white; }
+.source-status { font-size: 0.78rem; color: #888; margin-left: auto; }
+
+/* Subtitle controls */
+.subtitle-controls { display: flex; align-items: center; gap: 0.4rem; }
+.sub-label { color: #888; font-size: 0.75rem; }
+.sub-select { background: #333; color: #ccc; border: 1px solid #555; border-radius: 4px; padding: 0.15rem 0.4rem; font-size: 0.78rem; cursor: pointer; }
+.sub-select:focus { outline: 1px solid #D7141A; }
+
+/* Subtitle cue styling */
+video::cue { background: rgba(0,0,0,0.7); color: white; font-family: sans-serif; }
+
+/* Crew section (Tvůrci / Herci) classes live in static/css/index.css —
+   shared with series_detail.html. */
+
+/* Film hero */
+.film-hero { display: flex; gap: 1.5rem; }
+@media (max-width: 600px) { .film-hero { flex-direction: column; align-items: center; } }
+
+.film-cover { flex-shrink: 0; width: 200px; }
+.film-cover img { width: 200px; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.2); display: block; }
+.no-cover { width: 200px; height: 300px; background: #222; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #888; text-align: center; padding: 1rem; }
+
+/* Cover zoom overlay */
+.cover-zoom { position: relative; cursor: zoom-in; display: inline-block; border-radius: 8px; overflow: hidden; }
+.cover-zoom .zoom-icon {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 2rem; color: white; text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+    opacity: 0; transition: opacity 0.2s ease; pointer-events: none;
+    background: rgba(0,0,0,0.5); border-radius: 50%; width: 3rem; height: 3rem;
+    display: flex; align-items: center; justify-content: center;
+}
+.cover-zoom:hover .zoom-icon { opacity: 1; }
+.cover-zoom:hover img { filter: brightness(0.75); transition: filter 0.2s ease; }
+
+.film-meta h2 { margin: 0 0 0.4rem; font-size: 1.5rem; }
+.film-meta .year { color: #888; font-weight: 400; }
+.original-title { color: #888; font-style: italic; margin: 0 0 0.6rem; font-size: 0.9rem; }
+
+.meta-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+.meta-badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.82rem; font-weight: 600; text-decoration: none; }
+.meta-badge.tmdb { background: #01b4e4; color: #fff; }
+.meta-badge.imdb { background: #f5c518; color: #000; }
+.meta-badge.csfd { background: #ba0305; color: #fff; }
+.meta-badge.runtime { background: #f0f0f0; color: #333; }
+.meta-badge.none { background: #eef2f7; color: #6b7785; font-style: italic; }
+a.meta-badge:hover { filter: brightness(1.1); }
+
+.genre-tags { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+.genre-tag { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 16px; background: #f0f0f0; color: #333; text-decoration: none; font-size: 0.8rem; }
+.genre-tag:hover { background: #e0e0e0; }
+
+.film-description { line-height: 1.6; color: #333; }
+.film-description p { margin: 0; }
+
+/* Unified "Zdroje" list under the film hero. Light theme — matches the
+   original "Další zdroje" card look so the section stays readable on the
+   white page. Each row gets a colored left stripe identifying the
+   provider (blue=sktorrent, red=prehrajto, gold=sledujteto — loosely
+   Czech-flag palette; white→gold so it stays visible on white). The
+   currently-playing row has a gold background. */
+.sources-section { margin-top: 2rem; }
+.sources-section h3 { font-size: 1.1rem; margin: 0 0 0.6rem; color: #555; }
+.sources-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.source-row {
+    display: flex; align-items: center; gap: 0.8rem;
+    padding: 0.6rem 0.8rem;
+    background: #fafafa;
+    border: 1px solid #eee;
+    border-left: 5px solid #ccc;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    color: #333;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.source-row:hover { background: #f0f0f0; }
+.source-row:focus-visible { outline: 2px solid #11457E; outline-offset: 2px; }
+.source-row.source-row-sktorrent { border-left-color: #11457E; }
+.source-row.source-row-prehrajto { border-left-color: #D7141A; }
+.source-row.source-row-sledujteto { border-left-color: #C5A059; }
+.source-row.loading { opacity: 0.55; cursor: wait; }
+.source-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.source-row-title {
+    font-weight: 500; font-size: 0.9rem; color: #222;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.source-row-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.source-row-audio { background: #dcfce7; color: #065f46; padding: 0.15rem 0.45rem; border-radius: 3px; font-size: 0.75rem; font-weight: 500; }
+.source-row-audio .confidence { color: #16a34a; font-size: 0.7rem; margin-left: 0.2rem; }
+.source-row-subs { background: #dbeafe; color: #1e40af; padding: 0.15rem 0.45rem; border-radius: 3px; font-size: 0.75rem; font-weight: 500; }
+.source-row-res { background: #f3f4f6; color: #6b7280; padding: 0.15rem 0.45rem; border-radius: 3px; font-size: 0.72rem; font-weight: 500; }
+.source-row-primary { background: #a68412; color: #fff; padding: 0.15rem 0.45rem; border-radius: 3px; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.source-row-play {
+    flex-shrink: 0; width: 1.75rem; height: 1.75rem;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.06); border-radius: 50%; font-size: 0.8rem; color: #888;
+}
+
+/* Active playing row — gold highlight (same tone as the episode-detail
+   page used to have) means "this is what you're watching right now". */
+.source-row.active {
+    background: #C5A059;
+    border-color: #C5A059;
+    color: #1a1a1a;
+}
+.source-row.active .source-row-title { color: #fff; }
+.source-row.active .source-row-audio,
+.source-row.active .source-row-subs,
+.source-row.active .source-row-res { background: rgba(255,255,255,0.35); color: #1a1a1a; }
+.source-row.active .source-row-audio .confidence { color: #3a2a00; }
+.source-row.active .source-row-primary { background: #1a1a1a; color: #e0c47c; }
+.source-row.active .source-row-play { background: rgba(0,0,0,0.25); color: #fff; }
+</style>
+
+<script>
+/* --- Source-row / tab state helpers ------------------------------------- */
+
+/* Find the DOM node for a (provider, externalId) pair. Rows are indexed by
+   these two attributes because a URL can contain characters that would
+   need escaping in a querySelector attribute selector. */
+function findSourceRow(provider, externalId) {
+    var rows = document.querySelectorAll('.source-row[data-provider="' + provider + '"]');
+    for (var i = 0; i < rows.length; i++) {
+        if (rows[i].dataset.externalId === externalId) return rows[i];
+    }
+    return null;
+}
+
+/* Move the gold "now playing" highlight to (provider, externalId). Pass
+   null/undefined externalId to just clear the highlight. */
+function markActiveRow(provider, externalId) {
+    document.querySelectorAll('.source-row.active').forEach(function(r) { r.classList.remove('active'); });
+    document.querySelectorAll('.source-row.loading').forEach(function(r) { r.classList.remove('loading'); });
+    if (externalId) {
+        var row = findSourceRow(provider, externalId);
+        if (row) row.classList.add('active');
+    }
+    // Whichever row is now active should reflect the player's current
+    // state (paused → ▶, playing → ⏸); rows that just lost .active get
+    // their ▶ back via the same pass.
+    syncPlayIcons();
+}
+
+/* Activate the numbered tab for a provider. Clears active state on the
+   other tabs. Also toggles sktorrent quality button visibility since it's
+   rendered only when the sktorrent provider is the current one. */
+function setActiveTab(provider) {
+    document.querySelectorAll('.source-tab').forEach(function(t) { t.classList.remove('active'); });
+    var tab = document.querySelector('.source-tab[data-provider="' + provider + '"]');
+    if (tab) tab.classList.add('active');
+    var sktQ = document.getElementById('sktorrent-quality');
+    if (sktQ) sktQ.style.display = (provider === 'sktorrent') ? 'flex' : 'none';
+    var status = document.getElementById('source-status');
+    if (status) status.textContent = '';
+}
+
+/* --- User interactions ------------------------------------------------- */
+
+/* Clicking a numbered tab jumps to that provider's primary row (rows are
+   server-sorted with `is_primary DESC`, so the first row of a provider IS
+   the primary one). */
+function onTabClick(btn) {
+    var provider = btn.dataset.provider;
+    var row = document.querySelector('.source-row[data-provider="' + provider + '"]');
+    if (row) playSource(row);
+    else setActiveTab(provider);
+}
+
+/* Keyboard handler for source rows. Source rows are `<div role="button">`
+   rather than real `<button>` elements (they need to hold a multi-line
+   layout: title + badges row + play arrow), so we implement the standard
+   button keyboard semantics — Enter and Space both activate the row. */
+function onSourceRowKeydown(e, row) {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        playSource(row);
+    }
+}
+
+/* Clicking a source row: switch provider tab, mark the row as playing,
+   and delegate to the provider-specific playback function. If the same
+   row is clicked again while it's already the active playback, we toggle
+   pause/resume instead of reloading — the row's play icon is also kept
+   in sync with the <video> element's paused/playing state (see
+   `syncPlayIcons` below). The row carries two IDs: `externalId` is the
+   stable identity used to locate the row in the DOM (matches
+   video_sources.external_id), while `playbackId` is the handle that the
+   provider-specific playback API expects — for prehraj.to the full upload
+   URL, for sktorrent the video_id, for sledujteto the file_id. */
+function playSource(row) {
+    var player = document.getElementById('film-player');
+    // Re-click on the active row → pause/resume, don't reload.
+    if (row.classList.contains('active') && player && player.src) {
+        if (player.paused) player.play().catch(function(){});
+        else player.pause();
+        return;
+    }
+
+    var provider = row.dataset.provider;
+    var externalId = row.dataset.externalId;
+    var playbackId = row.dataset.playbackId || externalId;
+    setActiveTab(provider);
+    markActiveRow(provider, externalId);
+    row.classList.add('loading');
+    var onDone = function() { row.classList.remove('loading'); };
+
+    if (provider === 'sktorrent') {
+        resolveAndPlaySktorrent('Načítání...', onDone);
+    } else if (provider === 'prehrajto') {
+        playPrehrajtoUrl(playbackId, onDone);
+    } else if (provider === 'sledujteto') {
+        playSledujtetoFile(playbackId, onDone);
+    } else {
+        onDone();
+    }
+}
+
+/* Sync the icon on each row's play button with the <video> element's
+   state: while the player is actively playing, the active row shows a
+   pause glyph (so clicking it pauses); all other rows keep the play
+   glyph (clicking them switches source). When paused or ended, the
+   active row shows play again so re-clicking resumes. */
+var PLAY_GLYPH = '▶';    // ▶
+var PAUSE_GLYPH = '⏸';   // ⏸
+function syncPlayIcons() {
+    var player = document.getElementById('film-player');
+    var playing = player && !player.paused && !player.ended && player.readyState > 0;
+    document.querySelectorAll('.source-row').forEach(function(row) {
+        var icon = row.querySelector('.source-row-play');
+        if (!icon) return;
+        icon.textContent = (playing && row.classList.contains('active')) ? PAUSE_GLYPH : PLAY_GLYPH;
+    });
+}
+(function() {
+    var player = document.getElementById('film-player');
+    if (!player) return;
+    ['play', 'playing', 'pause', 'ended', 'emptied'].forEach(function(ev) {
+        player.addEventListener(ev, syncPlayIcons);
+    });
+})();
+
+/* --- Player core ------------------------------------------------------- */
+
+function playUrl(url, format) {
+    var player = document.getElementById('film-player');
+    if (format === 'hls' && window.Hls && Hls.isSupported()) {
+        if (window._hls) window._hls.destroy();
+        var hls = new Hls();
+        hls.loadSource(url);
+        hls.attachMedia(player);
+        hls.on(Hls.Events.MANIFEST_PARSED, function() { player.play(); });
+        window._hls = hls;
+    } else {
+        // Direct MP4 or native HLS (Safari)
+        player.src = url;
+        player.play().catch(function(){});
+    }
+}
+
+/* --- Per-provider playback -------------------------------------------- */
+
+/* SK Torrent rotates videos across online{N}.sktorrent.eu CDN servers, so
+   we never trust a stored CDN value — every resolve call picks the live
+   CDN host. Backend caches resolver results in BoundedTtlCache (6h TTL). */
+var sktorrentSources = [];
+
+function renderSktorrentSources(data) {
+    var status = document.getElementById('source-status');
+    if (!data || !data.sources || !data.sources.length) {
+        if (status) status.textContent = 'Zdroj nedostupný';
+        return false;
+    }
+    sktorrentSources = data.sources.map(function(s) {
+        return { url: s.url, quality: s.quality, res: s.res };
+    });
+    sktorrentSources.sort(function(a, b) { return b.res - a.res; });
+
+    var qualDiv = document.getElementById('sktorrent-quality');
+    if (qualDiv) {
+        qualDiv.innerHTML = '';
+        sktorrentSources.forEach(function(s, i) {
+            var btn = document.createElement('button');
+            btn.className = 'quality-btn' + (i === 0 ? ' active' : '');
+            btn.textContent = s.quality;
+            btn.onclick = function() { playSktorrent(i, btn); };
+            qualDiv.appendChild(btn);
+        });
+    }
+    return true;
+}
+
+function resolveAndPlaySktorrent(statusText, onDone) {
+    var status = document.getElementById('source-status');
+    if (status && statusText) status.textContent = statusText;
+    if (typeof sktorrentVideoId === 'undefined') {
+        if (onDone) onDone();
+        return;
+    }
+    return fetch('/api/films/sktorrent-resolve?video_id=' + sktorrentVideoId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (onDone) onDone();
+            if (!renderSktorrentSources(data)) return;
+            var qualDiv = document.getElementById('sktorrent-quality');
+            playSktorrent(0, qualDiv ? qualDiv.querySelector('.quality-btn') : null);
+        })
+        .catch(function() {
+            if (onDone) onDone();
+            if (status) status.textContent = 'Chyba obnovy zdroje';
+        });
+}
+
+function playSktorrent(index, btn) {
+    var player = document.getElementById('film-player');
+    if (window._hls) { window._hls.destroy(); window._hls = null; }
+    var source = sktorrentSources[index];
+    if (!source) return;
+    player.src = source.url;
+    player.dataset.sktorrentSrc = source.url;
+    player.dataset.sktorrentQuality = source.quality;
+    document.querySelectorAll('#sktorrent-quality .quality-btn').forEach(function(b) { b.classList.remove('active'); });
+    if (btn) btn.classList.add('active');
+    document.getElementById('source-status').textContent = '';
+}
+
+function playPrehrajtoUrl(url, onDone) {
+    var player = document.getElementById('film-player');
+    var status = document.getElementById('source-status');
+    if (!player) { if (onDone) onDone(); return; }
+
+    if (status) status.textContent = 'Načítání Přehraj.to...';
+    return fetch('/api/movies/video-url?url=' + encodeURIComponent(url))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (onDone) onDone();
+            if (!data.success || !data.video_url) {
+                if (status) status.textContent = 'Zdroj nedostupný';
+                return;
+            }
+            var streamUrl = data.video_url.replace(/&amp;/g, '&');
+            playUrl(streamUrl, streamUrl.indexOf('.m3u8') !== -1 ? 'hls' : 'mp4');
+            if (status) status.textContent = 'Přehraj.to';
+            if (data.subtitles && data.subtitles.length) {
+                addSubtitles(player, data.subtitles);
+            }
+        })
+        .catch(function() {
+            if (onDone) onDone();
+            if (status) status.textContent = 'Zdroj nedostupný';
+        });
+}
+
+function playSledujtetoFile(fileId, onDone) {
+    var player = document.getElementById('film-player');
+    var status = document.getElementById('source-status');
+    if (!player) { if (onDone) onDone(); return; }
+
+    if (status) status.textContent = 'Načítání sledujteto...';
+    return fetch('/api/sledujteto/resolve?id=' + encodeURIComponent(fileId))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (onDone) onDone();
+            if (!data.success || !data.video_url) {
+                if (status) status.textContent = 'Zdroj nedostupný';
+                return;
+            }
+            playUrl(data.video_url, data.video_url.indexOf('.m3u8') !== -1 ? 'hls' : 'mp4');
+            if (status) status.textContent = 'Sledujteto';
+        })
+        .catch(function() {
+            if (onDone) onDone();
+            if (status) status.textContent = 'Zdroj nedostupný';
+        });
+}
+
+/* --- Auto-play on load ------------------------------------------------- */
+/* Click the first source row (highest-priority provider's primary entry).
+   Rows are already server-sorted: sktorrent → prehrajto → sledujteto, and
+   within a provider is_primary=TRUE comes first. */
+(function() {
+    var first = document.querySelector('.source-row');
+    if (first) playSource(first);
+})();
+
+/* Defence against mid-play CDN rotation on SK Torrent — if the URL fails
+   while we were already playing, try resolving once more. */
+(function() {
+    var player = document.getElementById('film-player');
+    if (!player || typeof sktorrentVideoId === 'undefined') return;
+    var fallbackTried = false;
+    player.addEventListener('error', function() {
+        if (fallbackTried) return;
+        if (!player.src || player.src.indexOf('sktorrent.eu') === -1) return;
+        fallbackTried = true;
+        resolveAndPlaySktorrent('Obnovuji zdroj...', null);
+    }, true);
+})();
+
+/* --- Subtitle support -------------------------------------------------- */
+function addSubtitles(player, subtitles) {
+    // Remove existing tracks
+    var existing = player.querySelectorAll('track');
+    existing.forEach(function(t) { t.remove(); });
+
+    subtitles.forEach(function(sub) {
+        var track = document.createElement('track');
+        track.kind = 'subtitles';
+        track.label = sub.label || sub.lang.toUpperCase();
+        track.srclang = sub.lang || '';
+        // Proxy VTT through our server (CORS requirement)
+        track.src = '/api/movies/subtitle?url=' + encodeURIComponent(sub.url);
+        // Default to Czech if available
+        if (sub.lang === 'cze' || sub.lang === 'cs') {
+            track.default = true;
+        }
+        player.appendChild(track);
+    });
+
+    // Enable first Czech track, or first track if no Czech
+    var textTracks = player.textTracks;
+    var czFound = false;
+    for (var i = 0; i < textTracks.length; i++) {
+        if ((textTracks[i].language === 'cze' || textTracks[i].language === 'cs') && !czFound) {
+            textTracks[i].mode = 'showing';
+            czFound = true;
+        } else {
+            textTracks[i].mode = 'hidden';
+        }
+    }
+    if (!czFound && textTracks.length > 0) {
+        textTracks[0].mode = 'showing';
+    }
+
+    // Set default subtitle size
+    setSubSize(20);
+
+    // Watch textTracks for mode changes (user toggles via native CC menu)
+    // Show size controls only when any subtitle track is active
+    var controls = document.getElementById('subtitle-controls');
+    if (controls) {
+        function updateSubControls() {
+            var anyShowing = false;
+            for (var j = 0; j < textTracks.length; j++) {
+                if (textTracks[j].mode === 'showing') { anyShowing = true; break; }
+            }
+            controls.style.display = anyShowing ? 'flex' : 'none';
+        }
+        for (var k = 0; k < textTracks.length; k++) {
+            textTracks[k].addEventListener('cuechange', updateSubControls);
+        }
+        // Also listen for mode changes via MutationObserver on track elements
+        var trackEls = player.querySelectorAll('track');
+        trackEls.forEach(function(t) {
+            if (t.track) {
+                var origMode = t.track.mode;
+                Object.defineProperty(t.track, '_mode', { value: origMode, writable: true });
+            }
+        });
+        // Poll for mode changes (native CC menu doesn't fire events reliably)
+        setInterval(updateSubControls, 1000);
+        updateSubControls();
+    }
+}
+
+function setSubSize(px) {
+    var style = document.getElementById('sub-cue-style');
+    if (!style) {
+        style = document.createElement('style');
+        style.id = 'sub-cue-style';
+        document.head.appendChild(style);
+    }
+    style.textContent = 'video::cue { font-size: ' + px + 'px !important; }';
+}
+
+/* --- Search --- */
+function doSearch() {
+    var q = document.getElementById('film-search').value.trim();
+    if (q.length >= 2) window.location = '/filmy-online/?q=' + encodeURIComponent(q);
+}
+
+(function() {
+    var input = document.getElementById('film-search');
+    var dd = document.getElementById('search-results');
+    var timer = null;
+
+    input.addEventListener('input', function() {
+        clearTimeout(timer);
+        var q = this.value.trim();
+        if (q.length < 2) { dd.classList.remove('open'); return; }
+        timer = setTimeout(function() {
+            fetch('/api/films/search?q=' + encodeURIComponent(q))
+                .then(function(r){ return r.json(); })
+                .then(function(results) {
+                    if (!results.length) {
+                        dd.innerHTML = '<div style="padding:0.8rem;color:#888;text-align:center">Nic nenalezeno</div>';
+                    } else {
+                        var esc = function(s) { return String(s).replace(/[&<>"']/g, function(c) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); };
+                        dd.innerHTML = results.map(function(r) {
+                            var slug = esc(r.slug);
+                            var title = esc(r.title);
+                            var cover = r.cover
+                                ? '<img src="/filmy-online/' + slug + '.webp" alt="">'
+                                : '<div class="si-placeholder"></div>';
+                            var yr = r.year ? ' (' + r.year + ')' : '';
+                            var ratParts = [];
+                            if (r.tmdb_rating) {
+                                var t = r.tmdb_rating.toFixed(1);
+                                ratParts.push('<span class="si-rating tmdb" title="TMDB hodnocení" aria-label="TMDB hodnocení ' + t + '">' + t + '</span>');
+                            }
+                            if (r.imdb_rating) {
+                                var i = r.imdb_rating.toFixed(1);
+                                ratParts.push('<span class="si-rating imdb" title="IMDb hodnocení" aria-label="IMDb hodnocení ' + i + '">' + i + '</span>');
+                            }
+                            var rat = ratParts.join('');
+                            return '<a href="/filmy-online/' + slug + '/" class="search-item">'
+                                + cover + '<div class="si-info"><span class="si-title">' + title + yr + '</span>'
+                                + '<span class="si-meta">' + rat + '</span></div></a>';
+                        }).join('');
+                    }
+                    dd.classList.add('open');
+                })
+                .catch(function(){ dd.classList.remove('open'); });
+        }, 200);
+    });
+
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('#header-search-box')) dd.classList.remove('open');
+    });
+
+    input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            doSearch();
+        }
+    });
+})();
+</script>
+{% endblock %}

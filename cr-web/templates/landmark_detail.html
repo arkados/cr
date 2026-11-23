@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}{{ landmark.name }} | {{ landmark.type_name }}{% endblock %}
+
+{% block header_left %}
+<div class="logo-group">
+    <div style="display:flex;align-items:center;gap:0.5rem;">
+        {% match landmark.municipality_coat_of_arms_ext %}
+        {% when Some with (ext) %}
+        {% match landmark.municipality_slug %}
+        {% when Some with (mslug) %}
+        <img src="/{{ orp.slug }}/{{ mslug }}/znak-{{ mslug }}.{{ ext }}" alt="Znak {% match landmark.municipality_name %}{% when Some with (mname) %}{{ mname }}{% when None %}obce{% endmatch %}" title="Znak {% match landmark.municipality_name %}{% when Some with (mname) %}{{ mname }}{% when None %}obce{% endmatch %}" class="header-emblem">
+        {% when None %}
+        {% endmatch %}
+        {% when None %}
+        {% endmatch %}
+        <h1>{{ landmark.name }}</h1>
+    </div>
+</div>
+{% endblock %}
+
+{% block search_placeholder %}Hledat památky...{% endblock %}
+
+{% block header_right %}
+{% match region.flag_ext %}
+{% when Some with (ext) %}
+<div class="context-emblem">
+    <img src="/{{ region.slug }}/vlajka-{{ region.slug }}.{{ ext }}" alt="Vlajka {{ region.name }}" title="Vlajka {{ region.name }}" class="context-emblem-img">
+</div>
+{% when None %}
+{% endmatch %}
+{% endblock %}
+
+{% block breadcrumb %}
+<nav class="breadcrumbs" style="padding-top: 2rem; border: none; margin: 0;">
+    <a href="/">Česká republika</a> &raquo;
+    <a href="/{{ region.slug }}/">{{ region.name }}</a> &raquo;
+    <a href="/{{ orp.slug }}/">{{ orp.name }}</a> &raquo;
+    {% match landmark.municipality_slug %}
+    {% when Some with (mslug) %}
+    {% if mslug.as_str() != orp.slug.as_str() %}
+    {% match landmark.municipality_name %}
+    {% when Some with (mname) %}
+    <a href="/{{ orp.slug }}/{{ mslug }}/">{{ mname }}</a> &raquo;
+    {% when None %}
+    {% endmatch %}
+    {% endif %}
+    {% when None %}
+    {% endmatch %}
+    <span>{{ landmark.name }}</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<section class="info-hub">
+    <div class="content-left">
+        <span style="display: inline-block; background: var(--color-link); color: white; padding: 0.2rem 0.7rem; border-radius: 4px; font-size: 0.85rem; margin-bottom: 1rem;">{{ landmark.type_name }}</span>
+        <div style="line-height: 1.7; color: #333;">
+            {% if !photos.is_empty() %}
+            <div class="photo-inline" data-gallery-open="landmark" data-index="0" data-gallery-photos="[{% for photo in photos %}{% if !loop.first %},{% endif %}&quot;{{ photo.url }}&quot;{% endfor %}]">
+                <img src="{{ photos[0].thumb_url }}" alt="{{ landmark.name }}" loading="lazy">
+            </div>
+            {% endif %}
+            {% match landmark.npu_description %}
+            {% when Some with (npu) %}
+            {% for paragraph in npu.split("\n\n") %}
+            <p style="margin-bottom: 0.8rem;">{{ paragraph }}</p>
+            {% endfor %}
+            {% when None %}
+            {% match landmark.municipality_name %}
+            {% when Some with (mname) %}
+            <p class="lead-text">{{ landmark.name }} se nachází v obci {{ mname }}, {{ region.name }}.</p>
+            {% when None %}
+            <p class="lead-text">{{ landmark.name }}, {{ region.name }}.</p>
+            {% endmatch %}
+            {% endmatch %}
+        </div>
+    </div>
+    <aside class="content-right">
+        {% if photos.len() > 1 %}
+        <div class="photo-slideshow" data-slideshow="landmark" data-gallery-photos="[{% for photo in photos %}{% if !loop.first %},{% endif %}&quot;{{ photo.url }}&quot;{% endfor %}]" data-gallery-thumbs="[{% for photo in photos %}{% if !loop.first %},{% endif %}&quot;{{ photo.thumb_url }}&quot;{% endfor %}]" data-slide-start="1">
+            <img src="{{ photos[1].thumb_url }}" alt="{{ landmark.name }}" loading="lazy" data-index="1">
+            <button class="slide-nav slide-prev" aria-label="Předchozí">&#8249;</button>
+            <button class="slide-nav slide-next" aria-label="Další">&#8250;</button>
+            <span class="slide-counter">2 / {{ photos.len() }}</span>
+        </div>
+        {% endif %}
+        {% if landmark.latitude.is_some() %}
+        <div id="map" style="width:100%;height:300px;border-radius:12px;margin-bottom:1rem;" data-name="{{ landmark.name }}"></div>
+        {% endif %}
+        <div class="premium-infobox">
+            <div class="infobox-top">
+                <div class="infobox-title">{{ landmark.name }}</div>
+                <div class="infobox-subtitle">{{ landmark.type_name }}</div>
+            </div>
+            <div class="infobox-table">
+                {% match landmark.municipality_name %}
+                {% when Some with (mname) %}
+                <div class="row-data">
+                    <span class="label-data">Obec</span>
+                    <span class="value-data">{{ mname }}</span>
+                </div>
+                {% when None %}
+                {% endmatch %}
+                <div class="row-data">
+                    <span class="label-data">Kraj</span>
+                    <span class="value-data">{{ region.name }}</span>
+                </div>
+            </div>
+            <div style="padding: 0.75rem 1.25rem; display: flex; flex-direction: column; gap: 0.4rem;">
+                {% match landmark.wikipedia_url %}
+                {% when Some with (url) %}
+                <a href="{{ url }}" target="_blank" rel="noopener" style="color: var(--color-link); font-size: 0.9rem;">Wikipedia</a>
+                {% when None %}
+                {% endmatch %}
+            </div>
+        </div>
+    </aside>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{% if landmark.latitude.is_some() %}
+<script>
+(function(){
+    var lat = {{ landmark.latitude.unwrap_or(49.8) }};
+    var lon = {{ landmark.longitude.unwrap_or(15.5) }};
+    var map = L.map('map', {scrollWheelZoom: false}).setView([lat, lon], 14);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+    }).addTo(map);
+    var popupEl = document.createElement('div');
+    popupEl.textContent = document.getElementById('map').getAttribute('data-name') || '';
+    L.marker([lat, lon]).addTo(map).bindPopup(popupEl);
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,942 @@
+//! TV pořady listing and detail pages at `/tv-porady/`.
+//!
+//! Separate catalog from scripted series — reality shows, talk shows,
+//! cooking, telenovelas, etc. The data lives in `tv_shows` + `tv_episodes`
+//! (migration 041). URL shape mirrors `/serialy-online/` but no genre
+//! routes and no cast/crew sections for now — TV pořady typically don't
+//! have rich TMDB credits.
+
+use askama::Template;
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+
+use crate::error::WebResult;
+use crate::state::AppState;
+
+const TV_SHOWS_PER_PAGE: i64 = 24;
+
+/// Column list for `TvEpisodeRow` queries. After the #611 reader switch,
+/// provider attributes come from `video_sources` joined on `tv_episode_id`.
+/// Same shape as the series `EPISODE_COLUMNS` — see that const for rationale.
+const TV_EPISODE_COLUMNS: &str = "e.id, e.season, e.episode, e.title, \
+    (SELECT vs.external_id::INTEGER \
+       FROM video_sources vs \
+       JOIN video_providers p ON p.id = vs.provider_id \
+      WHERE vs.tv_episode_id = e.id AND p.slug = 'sktorrent' \
+        AND vs.is_primary AND vs.is_alive \
+      LIMIT 1) AS sktorrent_video_id, \
+    (SELECT vs.cdn::SMALLINT \
+       FROM video_sources vs \
+       JOIN video_providers p ON p.id = vs.provider_id \
+      WHERE vs.tv_episode_id = e.id AND p.slug = 'sktorrent' \
+        AND vs.is_primary AND vs.is_alive \
+      LIMIT 1) AS sktorrent_cdn, \
+    (SELECT vs.metadata->>'qualities' \
+       FROM video_sources vs \
+       JOIN video_providers p ON p.id = vs.provider_id \
+      WHERE vs.tv_episode_id = e.id AND p.slug = 'sktorrent' \
+        AND vs.is_primary AND vs.is_alive \
+      LIMIT 1) AS sktorrent_qualities, \
+    e.episode_name, e.overview, e.air_date, e.runtime, e.still_filename, \
+    (SELECT REPLACE(COALESCE(vs.metadata->>'url', 'https://prehraj.to/' || vs.external_id), \
+                    'https://prehrajto.cz/', 'https://prehraj.to/') \
+       FROM video_sources vs \
+       JOIN video_providers p ON p.id = vs.provider_id \
+      WHERE vs.tv_episode_id = e.id AND p.slug = 'prehrajto' AND vs.is_alive \
+      ORDER BY vs.is_primary DESC, vs.updated_at DESC \
+      LIMIT 1) AS prehrajto_url, \
+    false AS prehrajto_has_dub, \
+    false AS prehrajto_has_subs, \
+    e.slug";
+
+const TV_EPISODE_HAS_SOURCE_PREDICATE: &str = "EXISTS (SELECT 1 FROM video_sources vs \
+             WHERE vs.tv_episode_id = e.id AND vs.is_alive)";
+
+#[derive(FromRow, Serialize)]
+pub struct TvShowRow {
+    id: i32,
+    title: String,
+    slug: String,
+    first_air_year: Option<i16>,
+    last_air_year: Option<i16>,
+    description: Option<String>,
+    original_title: Option<String>,
+    tmdb_rating: Option<f32>,
+    imdb_rating: Option<f32>,
+    csfd_rating: Option<i16>,
+    // ČSFD id + rating count (#758/#764). Same chip semantics as films/series:
+    // chip renders only when csfd_rating is Some(_) AND
+    // csfd_rating_count >= 5 (filters legacy NULL-count rows + low-vote
+    // noise). When csfd_id is also Some(_) the chip wraps in an <a> to
+    // https://www.csfd.cz/film/{csfd_id}/; otherwise plain <span>.
+    csfd_id: Option<i32>,
+    csfd_rating_count: Option<i32>,
+    tmdb_id: Option<i32>,
+    imdb_id: Option<String>,
+    tmdb_vote_count: Option<i32>,
+    imdb_votes: Option<i32>,
+    #[allow(dead_code)]
+    season_count: Option<i16>,
+    #[allow(dead_code)]
+    episode_count: Option<i16>,
+    #[allow(dead_code)]
+    added_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// TMDB poster_path (e.g. `/mqlg…uJ.jpg`), backfilled by
+    /// `scripts/backfill-tmdb-poster-paths.py --table tv_shows`. When set,
+    /// `large_url_ext()` flips the extension to `.jpg`/`.png`, which
+    /// `tv_porad_cover_large_dynamic` proxies from TMDB. Otherwise falls
+    /// back to the R2-backed `-large.webp` URL.
+    tmdb_poster_path: Option<String>,
+}
+
+impl TvShowRow {
+    /// Extension for the large-cover URL rendered in the detail template.
+    /// Derived from `tmdb_poster_path` when the tv show has been backfilled;
+    /// otherwise falls back to `webp` so the existing R2-backed route keeps
+    /// serving until the backfill completes.
+    ///
+    /// Only `jpg` and `png` are whitelisted — `tv_porad_detail` dispatches
+    /// exactly those two large-cover extensions to the dynamic proxy, and
+    /// TMDB's in-practice storage is always JPG. Unknown/unexpected TMDB
+    /// suffixes (e.g. a future `jpeg`) get normalized to `jpg` rather than
+    /// falling through to the HTML handler with a mismatching URL.
+    pub fn large_url_ext(&self) -> &str {
+        match self.tmdb_poster_path.as_deref() {
+            Some(p) => match p.rsplit_once('.').map(|(_, ext)| ext) {
+                Some("png") => "png",
+                Some(_) | None => "jpg",
+            },
+            None => "webp",
+        }
+    }
+}
+
+/// Episode card shown on list page — one latest episode per TV pořad.
+#[derive(FromRow, Serialize)]
+pub struct TvEpisodeCardRow {
+    #[allow(dead_code)]
+    pub id: i32,
+    pub tv_show_slug: String,
+    pub tv_show_title: String,
+    pub tv_show_original_title: Option<String>,
+    pub tv_show_first_air_year: Option<i16>,
+    pub tv_show_tmdb_rating: Option<f32>,
+    pub tv_show_imdb_rating: Option<f32>,
+    pub tv_show_csfd_rating: Option<i16>,
+    pub tv_show_csfd_rating_count: Option<i32>,
+    pub tv_show_description: Option<String>,
+    pub season: i16,
+    pub episode: i16,
+    pub has_subtitles: Option<bool>,
+    pub has_dub: Option<bool>,
+    #[allow(dead_code)]
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub episode_slug: Option<String>,
+    pub episode_name: Option<String>,
+}
+
+#[derive(FromRow, Serialize)]
+pub struct TvEpisodeRow {
+    pub id: i32,
+    pub season: i16,
+    pub episode: i16,
+    pub title: Option<String>,
+    pub sktorrent_video_id: Option<i32>,
+    pub sktorrent_cdn: Option<i16>,
+    pub sktorrent_qualities: Option<String>,
+    pub episode_name: Option<String>,
+    pub overview: Option<String>,
+    pub air_date: Option<chrono::NaiveDate>,
+    pub runtime: Option<i16>,
+    pub still_filename: Option<String>,
+    pub prehrajto_url: Option<String>,
+    pub prehrajto_has_dub: bool,
+    pub prehrajto_has_subs: bool,
+    pub slug: Option<String>,
+}
+
+#[derive(FromRow)]
+struct CountRow {
+    count: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct TvShowQuery {
+    strana: Option<i64>,
+    razeni: Option<String>,
+    /// "asc" or "desc". Absent / unknown → desc (newest/best first), except
+    /// `razeni=nazev` where the page-template default is asc (A–Z).
+    smer: Option<String>,
+    q: Option<String>,
+}
+
+impl TvShowQuery {
+    fn page(&self) -> i64 {
+        self.strana.unwrap_or(1).max(1)
+    }
+
+    /// True when the user explicitly asked for ascending order. Mirrors
+    /// the films/series convention so the UI behaves consistently.
+    fn sort_asc(&self) -> bool {
+        self.smer.as_deref() == Some("asc")
+    }
+
+    fn order_clause(&self) -> &'static str {
+        let asc = self.sort_asc();
+        match (self.razeni.as_deref(), asc) {
+            (Some("rok"), false) => "s.first_air_year DESC NULLS LAST, s.title",
+            (Some("rok"), true) => "s.first_air_year ASC NULLS LAST, s.title",
+            // `imdb` and `tmdb` are sibling URL keys, each sorting by its
+            // own *_rating column (#701). Pre-#701 `razeni=imdb` was a
+            // legacy alias for tmdb_rating; the imdb_rating backfill in
+            // #690 retired that alias.
+            (Some("imdb"), false) => "s.imdb_rating DESC NULLS LAST, s.title",
+            (Some("imdb"), true) => "s.imdb_rating ASC NULLS LAST, s.title",
+            (Some("tmdb"), false) => "s.tmdb_rating DESC NULLS LAST, s.title",
+            (Some("tmdb"), true) => "s.tmdb_rating ASC NULLS LAST, s.title",
+            (Some("csfd"), false) => "s.csfd_rating DESC NULLS LAST, s.title",
+            (Some("csfd"), true) => "s.csfd_rating ASC NULLS LAST, s.title",
+            (Some("nazev"), false) => "s.title DESC",
+            (Some("nazev"), true) => "s.title ASC",
+            // Default + razeni=pridano: by added_at. Direction follows smer.
+            (_, false) => "s.added_at DESC NULLS LAST, s.title",
+            (_, true) => "s.added_at ASC NULLS LAST, s.title",
+        }
+    }
+
+    fn sort_key(&self) -> &str {
+        self.razeni.as_deref().unwrap_or("pridano")
+    }
+
+    /// Credibility threshold for rating-sort listings (#704). Mirrors
+    /// FilmsQuery::votes_threshold_predicate — see comment there.
+    fn votes_threshold_predicate(&self) -> Option<&'static str> {
+        match self.razeni.as_deref() {
+            Some("imdb") => Some("s.imdb_votes >= 500"),
+            Some("tmdb") => Some("s.tmdb_vote_count >= 50"),
+            Some("csfd") => Some("s.csfd_rating_count >= 5"),
+            _ => None,
+        }
+    }
+
+    /// Whether the user picked a non-default sort that the latest-episode
+    /// listing can't honour (it's hard-ordered by `created_at`). When true,
+    /// the handler switches to a shows-by-`order_clause` query instead so
+    /// the page actually reorders rather than silently ignoring `razeni=`.
+    fn wants_shows_mode(&self) -> bool {
+        matches!(
+            self.razeni.as_deref(),
+            Some("rok") | Some("imdb") | Some("tmdb") | Some("csfd") | Some("nazev")
+        )
+    }
+}
+
+#[derive(Template)]
+#[template(path = "tv_porady_list.html")]
+struct TvPoradyListTemplate {
+    img: String,
+    episodes: Vec<TvEpisodeCardRow>,
+    shows: Vec<TvShowRow>,
+    page: i64,
+    total_pages: i64,
+    total_count: i64,
+    #[allow(dead_code)]
+    sort_key: String,
+    query_string: String,
+    search_query: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "tv_porad_detail.html")]
+struct TvPoradDetailTemplate {
+    img: String,
+    show: TvShowRow,
+    seasons: Vec<Season>,
+}
+
+#[derive(Template)]
+#[template(path = "tv_epizoda_detail.html")]
+struct TvEpizodaDetailTemplate {
+    img: String,
+    show: TvShowRow,
+    episode: TvEpisodeRow,
+    prev_episode: Option<EpisodeNav>,
+    next_episode: Option<EpisodeNav>,
+}
+
+pub struct EpisodeNav {
+    pub season: i16,
+    pub episode: i16,
+    pub episode_name: Option<String>,
+    pub slug: Option<String>,
+}
+
+pub struct Season {
+    pub number: i16,
+    pub episodes: Vec<TvEpisodeRow>,
+}
+
+pub async fn tv_porady_list(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<TvShowQuery>,
+) -> WebResult<Response> {
+    let page = params.page();
+    let offset = (page - 1) * TV_SHOWS_PER_PAGE;
+    let order = params.order_clause();
+
+    let search_q = params.q.as_ref().and_then(|q| {
+        let t = q.trim();
+        if t.len() >= 2 {
+            Some(format!("%{t}%"))
+        } else {
+            None
+        }
+    });
+
+    // Search uses `unaccent()` so "cernobyl" finds "Černobyl" (#673
+    // parity with films/series). Diacritic-exact hits rank first via
+    // the leading CASE in ORDER BY.
+    let (total_count, shows, episodes) = if let Some(ref pattern) = search_q {
+        // Same vote-count gating as the shows-mode branch — surfaced by
+        // Copilot review on PR #710. Otherwise a `?q=…&razeni=imdb` search
+        // would re-introduce low-vote outliers at the top.
+        let votes_clause = params
+            .votes_threshold_predicate()
+            .map(|p| format!(" AND {p}"))
+            .unwrap_or_default();
+        let count_query = format!(
+            "SELECT count(*) as count FROM tv_shows s \
+             WHERE (unaccent(s.title) ILIKE unaccent($1) \
+                OR unaccent(s.original_title) ILIKE unaccent($1)){votes_clause}"
+        );
+        let count_row = sqlx::query_as::<_, CountRow>(&count_query)
+            .bind(pattern)
+            .fetch_one(&state.db)
+            .await?;
+
+        let query = format!(
+            "SELECT s.id, s.title, s.slug, s.first_air_year, s.last_air_year, \
+             s.description, s.original_title, s.tmdb_rating, s.imdb_rating, s.csfd_rating, \
+             s.csfd_id, s.csfd_rating_count, s.tmdb_id, s.imdb_id, s.tmdb_vote_count, s.imdb_votes, \
+             s.season_count, s.episode_count, s.added_at, \
+             s.tmdb_poster_path \
+             FROM tv_shows s \
+             WHERE (unaccent(s.title) ILIKE unaccent($1) \
+                OR unaccent(s.original_title) ILIKE unaccent($1)){votes_clause} \
+             ORDER BY \
+               (CASE WHEN s.title ILIKE $1 OR s.original_title ILIKE $1 THEN 0 ELSE 1 END), \
+               {order} LIMIT $2 OFFSET $3"
+        );
+        let rows = sqlx::query_as::<_, TvShowRow>(&query)
+            .bind(pattern)
+            .bind(TV_SHOWS_PER_PAGE)
+            .bind(offset)
+            .fetch_all(&state.db)
+            .await?;
+        (count_row.count.unwrap_or(0), rows, Vec::new())
+    } else if params.wants_shows_mode() {
+        // Non-default sort (rok / imdb / tmdb / nazev) can't be honoured by
+        // the latest-episode-per-show query — it's hard-ordered by
+        // `ps.created_at DESC` so the row layout matches the "what's new"
+        // home view. When the user explicitly asks for a different order,
+        // switch to a shows-by-`order_clause` query so the page actually
+        // reorders instead of silently ignoring `razeni=` (#702 review).
+        let votes_filter = params
+            .votes_threshold_predicate()
+            .map(|p| format!("WHERE {p}"))
+            .unwrap_or_default();
+        let count_query = format!("SELECT count(*) as count FROM tv_shows s {votes_filter}");
+        let count_row = sqlx::query_as::<_, CountRow>(&count_query)
+            .fetch_one(&state.db)
+            .await?;
+        let query = format!(
+            "SELECT s.id, s.title, s.slug, s.first_air_year, s.last_air_year, \
+             s.description, s.original_title, s.tmdb_rating, s.imdb_rating, s.csfd_rating, \
+             s.csfd_id, s.csfd_rating_count, s.tmdb_id, s.imdb_id, s.tmdb_vote_count, s.imdb_votes, \
+             s.season_count, s.episode_count, s.added_at, \
+             s.tmdb_poster_path \
+             FROM tv_shows s {votes_filter} \
+             ORDER BY {order} LIMIT $1 OFFSET $2"
+        );
+        let rows = sqlx::query_as::<_, TvShowRow>(&query)
+            .bind(TV_SHOWS_PER_PAGE)
+            .bind(offset)
+            .fetch_all(&state.db)
+            .await?;
+        (count_row.count.unwrap_or(0), rows, Vec::new())
+    } else {
+        let count_row = sqlx::query_as::<_, CountRow>(
+            "SELECT count(DISTINCT e.tv_show_id) as count FROM tv_episodes e",
+        )
+        .fetch_one(&state.db)
+        .await?;
+
+        let episodes =
+            fetch_latest_episode_cards(&state, !params.sort_asc(), TV_SHOWS_PER_PAGE, offset)
+                .await?;
+        (count_row.count.unwrap_or(0), Vec::new(), episodes)
+    };
+
+    let total_pages = (total_count as f64 / TV_SHOWS_PER_PAGE as f64).ceil() as i64;
+
+    let query_string = build_query_string(&params);
+
+    let search_query = params.q.clone().and_then(|q| {
+        let t = q.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+
+    let tmpl = TvPoradyListTemplate {
+        img: state.image_base_url.clone(),
+        episodes,
+        shows,
+        page,
+        total_pages,
+        total_count,
+        sort_key: params.sort_key().to_string(),
+        query_string,
+        search_query,
+    };
+    let html = tmpl.render()?;
+    // Search-result HTML is `?q=`-derived: tag it `private,
+    // max-age=60` so the browser may reuse it for a minute on
+    // back-button / repeat-search but no shared cache stores it.
+    // Parity with films and series (#673 / #674). Gate matches
+    // the search predicate (`search_q` filters `len() >= 2`).
+    if is_active_search(params.q.as_deref()) {
+        Ok(super::search_cached_html(html))
+    } else {
+        Ok(Html(html).into_response())
+    }
+}
+
+/// True when `?q=…` is a real search query — same trim+length gate
+/// the search predicate uses (`search_q` filters `t.len() >= 2`,
+/// byte length). Single source of truth so the search-cache branch
+/// and the predicate gate can't drift apart on multibyte chars.
+fn is_active_search(q: Option<&str>) -> bool {
+    q.map(str::trim).is_some_and(|t| t.len() >= 2)
+}
+
+async fn fetch_latest_episode_cards(
+    state: &AppState,
+    desc: bool,
+    limit: i64,
+    offset: i64,
+) -> WebResult<Vec<TvEpisodeCardRow>> {
+    // razeni=pridano honors smer (#serialy-razeni fix). The outer ORDER BY
+    // was hardcoded DESC, so `?smer=asc` toggled the chip but the grid
+    // stayed the same.
+    let direction = if desc { "DESC" } else { "ASC" };
+    let sql = format!(
+        "WITH per_show AS ( \
+            SELECT DISTINCT ON (e.tv_show_id) \
+                e.id, e.tv_show_id, e.season, e.episode, e.has_subtitles, e.has_dub, e.created_at \
+            FROM tv_episodes e \
+            ORDER BY e.tv_show_id, e.created_at DESC \
+         ) \
+         SELECT ps.id, \
+            s.slug AS tv_show_slug, \
+            s.title AS tv_show_title, \
+            s.original_title AS tv_show_original_title, \
+            s.first_air_year AS tv_show_first_air_year, \
+            s.tmdb_rating AS tv_show_tmdb_rating, \
+            s.imdb_rating AS tv_show_imdb_rating, \
+            s.csfd_rating AS tv_show_csfd_rating, \
+            s.csfd_rating_count AS tv_show_csfd_rating_count, \
+            s.description AS tv_show_description, \
+            ps.season, ps.episode, ps.has_subtitles, ps.has_dub, ps.created_at, \
+            (SELECT e2.slug FROM tv_episodes e2 WHERE e2.id = ps.id) AS episode_slug, \
+            (SELECT e2.episode_name FROM tv_episodes e2 WHERE e2.id = ps.id) AS episode_name \
+         FROM per_show ps \
+         JOIN tv_shows s ON s.id = ps.tv_show_id \
+         ORDER BY ps.created_at {direction} NULLS LAST \
+         LIMIT $1 OFFSET $2"
+    );
+
+    let rows = sqlx::query_as::<_, TvEpisodeCardRow>(&sql)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+    Ok(rows)
+}
+
+#[derive(Serialize)]
+struct TvPoradSearchResult {
+    slug: String,
+    title: String,
+    year: Option<i16>,
+    tmdb_rating: Option<f32>,
+    imdb_rating: Option<f32>,
+    cover: bool,
+}
+
+#[derive(FromRow)]
+struct TvPoradSearchRow {
+    slug: String,
+    title: String,
+    first_air_year: Option<i16>,
+    tmdb_rating: Option<f32>,
+    imdb_rating: Option<f32>,
+}
+
+/// GET /api/tv-porady/search?q=...
+pub async fn tv_porady_search(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> WebResult<Response> {
+    let q = params.get("q").map(|s| s.trim()).unwrap_or("");
+    if q.len() < 2 {
+        return Ok(super::search_cached_json(Vec::<TvPoradSearchResult>::new()));
+    }
+    let pattern = format!("%{q}%");
+    let starts_pattern = format!("{q}%");
+    // WHERE matches via `unaccent()` for the same reason as films and
+    // series (#673): "cernobyl" finds "Černobyl". Raw ILIKE in the
+    // CASE keeps diacritic-exact hits ranked ahead of unaccent-only
+    // hits.
+    let rows = sqlx::query_as::<_, TvPoradSearchRow>(
+        "SELECT slug, title, first_air_year, tmdb_rating, imdb_rating \
+         FROM tv_shows \
+         WHERE unaccent(title) ILIKE unaccent($1) \
+            OR unaccent(original_title) ILIKE unaccent($1) \
+         ORDER BY \
+           CASE WHEN title ILIKE $2 THEN 0 \
+                WHEN title ILIKE $1 THEN 1 \
+                WHEN original_title ILIKE $2 THEN 2 \
+                ELSE 3 END, \
+           tmdb_rating DESC NULLS LAST \
+         LIMIT 10",
+    )
+    .bind(&pattern)
+    .bind(&starts_pattern)
+    .fetch_all(&state.db)
+    .await?;
+
+    let results: Vec<TvPoradSearchResult> = rows
+        .into_iter()
+        .map(|r| TvPoradSearchResult {
+            slug: r.slug,
+            title: r.title,
+            year: r.first_air_year,
+            tmdb_rating: r.tmdb_rating,
+            imdb_rating: r.imdb_rating,
+            cover: true,
+        })
+        .collect();
+
+    Ok(super::search_cached_json(results))
+}
+
+/// GET /tv-porady/{slug}/ — TV pořad detail with episode list.
+pub async fn tv_porad_detail(
+    State(state): State<AppState>,
+    Path(slug_raw): Path<String>,
+) -> WebResult<Response> {
+    // Large cover dynamically proxied from TMDB — real extension in URL so
+    // the response content type matches what the template rendered. See
+    // `tv_porad_cover_large_dynamic` for the fallback chain.
+    if slug_raw.ends_with("-large.jpg") || slug_raw.ends_with("-large.png") {
+        return tv_porad_cover_large_dynamic(State(state), Path(slug_raw)).await;
+    }
+    // WebP cover variants routed here too (no genre routes on /tv-porady/)
+    if slug_raw.ends_with(".webp") {
+        return tv_porad_cover(State(state), Path(slug_raw)).await;
+    }
+
+    let show = sqlx::query_as::<_, TvShowRow>(
+        "SELECT id, title, slug, first_air_year, last_air_year, description, \
+         original_title, tmdb_rating, imdb_rating, csfd_rating, csfd_id, csfd_rating_count, \
+         tmdb_id, imdb_id, tmdb_vote_count, imdb_votes, \
+         season_count, episode_count, added_at, tmdb_poster_path FROM tv_shows WHERE slug = $1",
+    )
+    .bind(&slug_raw)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let show = match show {
+        Some(s) => s,
+        None => {
+            let old_match = sqlx::query_as::<_, TvShowRow>(
+                "SELECT id, title, slug, first_air_year, last_air_year, description, \
+                 original_title, tmdb_rating, imdb_rating, csfd_rating, csfd_id, csfd_rating_count, \
+                 tmdb_id, imdb_id, tmdb_vote_count, imdb_votes, \
+                 season_count, episode_count, added_at, tmdb_poster_path FROM tv_shows WHERE old_slug = $1",
+            )
+            .bind(&slug_raw)
+            .fetch_optional(&state.db)
+            .await?;
+            match old_match {
+                Some(s) => {
+                    let new_url = format!("/tv-porady/{}/", s.slug);
+                    return Ok(
+                        (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, new_url)])
+                            .into_response(),
+                    );
+                }
+                None => return Ok((StatusCode::NOT_FOUND, "TV pořad nenalezen").into_response()),
+            }
+        }
+    };
+
+    let episodes = sqlx::query_as::<_, TvEpisodeRow>(&format!(
+        "SELECT {TV_EPISODE_COLUMNS} \
+           FROM tv_episodes e \
+          WHERE e.tv_show_id = $1 \
+            AND {TV_EPISODE_HAS_SOURCE_PREDICATE} \
+          ORDER BY e.season, e.episode, e.id",
+    ))
+    .bind(show.id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut seasons: Vec<Season> = Vec::new();
+    let mut current_season: Option<Season> = None;
+    let mut seen_in_season: std::collections::HashSet<i16> = std::collections::HashSet::new();
+
+    for ep in episodes {
+        let boundary = current_season.as_ref().map(|s| s.number) != Some(ep.season);
+        if boundary && let Some(finished) = current_season.take() {
+            seasons.push(finished);
+            seen_in_season.clear();
+        }
+        if current_season.is_none() {
+            current_season = Some(Season {
+                number: ep.season,
+                episodes: Vec::new(),
+            });
+        }
+        if seen_in_season.insert(ep.episode)
+            && let Some(ref mut s) = current_season
+        {
+            s.episodes.push(ep);
+        }
+    }
+    if let Some(s) = current_season {
+        seasons.push(s);
+    }
+
+    let tmpl = TvPoradDetailTemplate {
+        img: state.image_base_url.clone(),
+        show,
+        seasons,
+    };
+    Ok(Html(tmpl.render()?).into_response())
+}
+
+/// GET /tv-porady/{slug}/{ep_slug}/ — episode detail page with player.
+pub async fn tv_epizoda_detail(
+    State(state): State<AppState>,
+    Path((slug, ep_path)): Path<(String, String)>,
+) -> WebResult<Response> {
+    let show = sqlx::query_as::<_, TvShowRow>(
+        "SELECT id, title, slug, first_air_year, last_air_year, description, \
+         original_title, tmdb_rating, imdb_rating, csfd_rating, csfd_id, csfd_rating_count, \
+         tmdb_id, imdb_id, tmdb_vote_count, imdb_votes, \
+         season_count, episode_count, added_at, tmdb_poster_path FROM tv_shows WHERE slug = $1",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let show = match show {
+        Some(s) => s,
+        None => {
+            let old_match = sqlx::query_as::<_, TvShowRow>(
+                "SELECT id, title, slug, first_air_year, last_air_year, description, \
+                 original_title, tmdb_rating, imdb_rating, csfd_rating, csfd_id, csfd_rating_count, \
+                 tmdb_id, imdb_id, tmdb_vote_count, imdb_votes, \
+                 season_count, episode_count, added_at, tmdb_poster_path FROM tv_shows WHERE old_slug = $1",
+            )
+            .bind(&slug)
+            .fetch_optional(&state.db)
+            .await?;
+            match old_match {
+                Some(s) => {
+                    let new_url = format!("/tv-porady/{}/{ep_path}/", s.slug);
+                    return Ok(
+                        (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, new_url)])
+                            .into_response(),
+                    );
+                }
+                None => return Ok((StatusCode::NOT_FOUND, "TV pořad nenalezen").into_response()),
+            }
+        }
+    };
+
+    let episode = sqlx::query_as::<_, TvEpisodeRow>(&format!(
+        "SELECT {TV_EPISODE_COLUMNS} \
+           FROM tv_episodes e \
+          WHERE e.tv_show_id = $1 AND e.slug = $2 \
+            AND {TV_EPISODE_HAS_SOURCE_PREDICATE} \
+          ORDER BY e.id LIMIT 1",
+    ))
+    .bind(show.id)
+    .bind(&ep_path)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let episode = match episode {
+        Some(ep) => ep,
+        None => {
+            if let Some((s_str, e_str)) = ep_path.split_once('x') {
+                if let (Ok(season_num), Ok(episode_num)) =
+                    (s_str.parse::<i16>(), e_str.parse::<i16>())
+                {
+                    let found = sqlx::query_as::<_, TvEpisodeRow>(&format!(
+                        "SELECT {TV_EPISODE_COLUMNS} \
+                           FROM tv_episodes e \
+                          WHERE e.tv_show_id = $1 AND e.season = $2 AND e.episode = $3 \
+                            AND {TV_EPISODE_HAS_SOURCE_PREDICATE} \
+                          ORDER BY e.id LIMIT 1",
+                    ))
+                    .bind(show.id)
+                    .bind(season_num)
+                    .bind(episode_num)
+                    .fetch_optional(&state.db)
+                    .await?;
+
+                    if let Some(ep) = found {
+                        if let Some(ref ep_slug) = ep.slug {
+                            let new_url = format!("/tv-porady/{}/{ep_slug}/", show.slug);
+                            return Ok((
+                                StatusCode::MOVED_PERMANENTLY,
+                                [(header::LOCATION, new_url)],
+                            )
+                                .into_response());
+                        }
+                        ep
+                    } else {
+                        return Ok((StatusCode::NOT_FOUND, "Epizoda nenalezena").into_response());
+                    }
+                } else {
+                    return Ok((StatusCode::NOT_FOUND, "Neplatná URL").into_response());
+                }
+            } else {
+                return Ok((StatusCode::NOT_FOUND, "Epizoda nenalezena").into_response());
+            }
+        }
+    };
+
+    let season_num = episode.season;
+    let episode_num = episode.episode;
+
+    let all_episodes = sqlx::query_as::<_, (i16, i16, Option<String>, Option<String>)>(&format!(
+        "SELECT DISTINCT ON (e.season, e.episode) e.season, e.episode, e.episode_name, e.slug \
+           FROM tv_episodes e \
+          WHERE e.tv_show_id = $1 \
+            AND {TV_EPISODE_HAS_SOURCE_PREDICATE} \
+          ORDER BY e.season, e.episode",
+    ))
+    .bind(show.id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let current_idx = all_episodes
+        .iter()
+        .position(|(s, e, _, _)| *s == season_num && *e == episode_num);
+    let prev_episode = current_idx
+        .and_then(|i| i.checked_sub(1).and_then(|j| all_episodes.get(j)))
+        .map(|(s, e, n, sl)| EpisodeNav {
+            season: *s,
+            episode: *e,
+            episode_name: n.clone(),
+            slug: sl.clone(),
+        });
+    let next_episode = current_idx
+        .and_then(|i| all_episodes.get(i + 1))
+        .map(|(s, e, n, sl)| EpisodeNav {
+            season: *s,
+            episode: *e,
+            episode_name: n.clone(),
+            slug: sl.clone(),
+        });
+
+    let tmpl = TvEpizodaDetailTemplate {
+        img: state.image_base_url.clone(),
+        show,
+        episode,
+        prev_episode,
+        next_episode,
+    };
+    Ok(Html(tmpl.render()?).into_response())
+}
+
+/// GET /tv-porady/{slug}.webp — cover (small) with TMDB fallback.
+pub async fn tv_porad_cover(
+    State(state): State<AppState>,
+    Path(slug_webp): Path<String>,
+) -> WebResult<Response> {
+    use crate::handlers::cover_proxy::{
+        fetch_cover, new_r2_key, parse_cover_slug, placeholder_webp,
+    };
+
+    if slug_webp.ends_with("-large.webp") {
+        return Box::pin(tv_porad_cover_large(State(state), Path(slug_webp))).await;
+    }
+    let (slug, _is_large) = parse_cover_slug(&slug_webp);
+
+    #[derive(sqlx::FromRow)]
+    struct CoverRow {
+        id: i32,
+    }
+
+    let row = sqlx::query_as::<_, CoverRow>("SELECT id FROM tv_shows WHERE slug = $1")
+        .bind(&slug)
+        .fetch_optional(&state.db)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(placeholder_webp());
+    };
+
+    let new_key = new_r2_key("tv-shows", row.id, false);
+    Ok(fetch_cover(&state, &new_key).await)
+}
+
+/// GET /tv-porady/{slug}-large.webp — large (780×1170) cover.
+pub async fn tv_porad_cover_large(
+    State(state): State<AppState>,
+    Path(slug_webp): Path<String>,
+) -> WebResult<Response> {
+    use crate::handlers::cover_proxy::{
+        immutable_webp, new_r2_key, parse_cover_slug, placeholder_webp, try_fetch_r2,
+    };
+
+    let (slug, _is_large) = parse_cover_slug(&slug_webp);
+
+    #[derive(sqlx::FromRow)]
+    struct CoverRow {
+        id: i32,
+    }
+
+    let row = sqlx::query_as::<_, CoverRow>("SELECT id FROM tv_shows WHERE slug = $1")
+        .bind(&slug)
+        .fetch_optional(&state.db)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(placeholder_webp());
+    };
+
+    use crate::handlers::cover_proxy::no_store_webp;
+    // Pre-migration large covers were cached under the `series/large/`
+    // prefix (tv_shows shared the series_covers_dir). (R2 key,
+    // is_small_fallback) — small-variant fallbacks are served with
+    // `no-store` so a later-imported large can take over (see
+    // films_cover_large).
+    let candidates: Vec<(String, bool)> = vec![
+        (new_r2_key("tv-shows", row.id, true), false),
+        (format!("series/large/{slug}.webp"), false),
+        (new_r2_key("tv-shows", row.id, false), true),
+    ];
+    for (key, is_small_fallback) in &candidates {
+        if let Some(bytes) = try_fetch_r2(&state, key).await {
+            return Ok(if *is_small_fallback {
+                no_store_webp(bytes)
+            } else {
+                immutable_webp(bytes)
+            });
+        }
+    }
+    Ok(placeholder_webp())
+}
+
+/// GET /tv-porady/{slug}-large.{jpg,png} — proxy TMDB poster on demand.
+///
+/// Mirrors `films_cover_large_dynamic` / `series_cover_large_dynamic`:
+/// detail-page thumbnails get few hits, so we skip R2 storage and stream
+/// the TMDB image through. Cloudflare caches the response for a year.
+/// On any failure we serve a placeholder in the SAME format the URL
+/// advertises so browsers and OG scrapers decode without a MIME mismatch.
+pub async fn tv_porad_cover_large_dynamic(
+    State(state): State<AppState>,
+    Path(slug_ext): Path<String>,
+) -> WebResult<Response> {
+    use crate::handlers::cover_proxy::placeholder_for_ext;
+
+    let (slug, ext) = if let Some(s) = slug_ext.strip_suffix("-large.jpg") {
+        (s, "jpg")
+    } else if let Some(s) = slug_ext.strip_suffix("-large.png") {
+        (s, "png")
+    } else {
+        (slug_ext.as_str(), "jpg")
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct CoverRow {
+        tmdb_poster_path: Option<String>,
+    }
+
+    let row =
+        sqlx::query_as::<_, CoverRow>("SELECT tmdb_poster_path FROM tv_shows WHERE slug = $1")
+            .bind(slug)
+            .fetch_optional(&state.db)
+            .await?;
+
+    let Some(path) = row.and_then(|r| r.tmdb_poster_path) else {
+        return Ok(placeholder_for_ext(ext));
+    };
+
+    let url = format!("https://image.tmdb.org/t/p/w780{path}");
+    let Ok(resp) = state
+        .http_client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    else {
+        return Ok(placeholder_for_ext(ext));
+    };
+    if !resp.status().is_success() {
+        return Ok(placeholder_for_ext(ext));
+    }
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string());
+    let Ok(bytes) = resp.bytes().await else {
+        return Ok(placeholder_for_ext(ext));
+    };
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, ct),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".to_string(),
+            ),
+        ],
+        bytes.to_vec(),
+    )
+        .into_response())
+}
+
+fn build_query_string(params: &TvShowQuery) -> String {
+    let mut parts: Vec<(&str, String)> = Vec::new();
+    if params.razeni.is_some() {
+        parts.push(("razeni", params.sort_key().to_string()));
+    }
+    if let Some(ref smer) = params.smer
+        && smer == "asc"
+    {
+        parts.push(("smer", "asc".to_string()));
+    }
+    if let Some(ref q) = params.q {
+        let t = q.trim();
+        if !t.is_empty() {
+            parts.push(("q", t.to_string()));
+        }
+    }
+    super::build_pagination_qs(&parts)
+}

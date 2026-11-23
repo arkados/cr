@@ -1,0 +1,325 @@
+//! Video library upload pipeline.
+//!
+//! Glues the Streamtape client (#317), the R2 client (#318) and the
+//! `PgVideoRepository` (#316) together: takes a freshly downloaded local
+//! file and the metadata extracted from yt-dlp, uploads everything to the
+//! external services and inserts the row into the `videos` table.
+//!
+//! See parent issue #314 for the architecture diagram.
+
+use std::path::Path;
+
+use bytes::Bytes;
+use cr_domain::repository::{NewVideo, VideoRecord, VideoRepository};
+use sha2::{Digest, Sha256};
+
+use crate::r2::{R2Client, R2Error};
+use crate::repositories::PgVideoRepository;
+use crate::streamtape::{StreamtapeClient, StreamtapeError};
+
+/// Metadata captured from yt-dlp / the user's Stáhnout click that the
+/// pipeline needs in order to publish a video to the library.
+#[derive(Debug, Clone)]
+pub struct PublishMetadata {
+    pub source_url: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub duration_sec: Option<i32>,
+    pub source_extractor: Option<String>,
+    pub quality: String,
+    pub format_ext: String,
+    /// Human-readable resolution like `"1080p"` or `"720p"` as yt-dlp
+    /// reported it on the `format.resolution` field for the picked
+    /// stream. Drives the library card's top-right badge — see #366.
+    /// `None` means the source didn't report a resolution (rare).
+    pub resolution: Option<String>,
+    /// Optional upstream thumbnail URL provided by yt-dlp. The pipeline
+    /// downloads it and stores it on R2; if missing or download fails,
+    /// the pipeline falls back to Streamtape's `getsplash`.
+    pub upstream_thumbnail_url: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PublishError {
+    #[error("streamtape upload failed: {0}")]
+    Streamtape(#[from] StreamtapeError),
+    #[error("R2 upload failed: {0}")]
+    R2(#[from] R2Error),
+    #[error("database insert failed: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Orchestrator that owns the three external collaborators.
+///
+/// Cheap to clone — wraps `Arc`-shaped clients internally. The handler
+/// builds one of these once at startup (when configs are present) and
+/// stashes it on `AppState`.
+#[derive(Clone)]
+pub struct VideoLibraryPipeline {
+    streamtape: StreamtapeClient,
+    r2: R2Client,
+    repo: std::sync::Arc<PgVideoRepository>,
+    http: reqwest::Client,
+}
+
+impl VideoLibraryPipeline {
+    pub fn new(
+        streamtape: StreamtapeClient,
+        r2: R2Client,
+        repo: std::sync::Arc<PgVideoRepository>,
+        http: reqwest::Client,
+    ) -> Self {
+        Self {
+            streamtape,
+            r2,
+            repo,
+            http,
+        }
+    }
+
+    /// Dedup check used by the handler before invoking yt-dlp at all.
+    /// Returns `Some(record)` if `(source_url, quality, format_ext)`
+    /// already exists. In practice the library only ever stores MP4
+    /// rows (Streamtape re-encodes everything we upload), so the
+    /// handler always queries with `format_ext = "mp4"` regardless
+    /// of what container the user actually picked — see #366.
+    pub async fn find_existing(
+        &self,
+        source_url: &str,
+        quality: &str,
+        format_ext: &str,
+    ) -> Result<Option<VideoRecord>, sqlx::Error> {
+        self.repo
+            .find_by_source_quality_and_format(source_url, quality, format_ext)
+            .await
+    }
+
+    /// Bump `last_accessed_at` on the row identified by `id`. The
+    /// handler calls this whenever a dedup lookup returns a hit —
+    /// both when serving the existing MP4 via the library redirect
+    /// and when doing a fresh non-MP4 transcode alongside an
+    /// already-published MP4 row — so the card slides to the top of
+    /// the "Stažená videa" grid (#366).
+    pub async fn touch(&self, id: i32) -> Result<(), sqlx::Error> {
+        self.repo.touch(id).await
+    }
+
+    /// Borrowed view of the underlying Streamtape client — used by the
+    /// library API endpoints to resolve playback URLs and to delete files
+    /// when removing a library entry.
+    pub fn streamtape_client(&self) -> &StreamtapeClient {
+        &self.streamtape
+    }
+
+    /// Borrowed view of the underlying R2 client — used by the library
+    /// delete endpoint to remove the orphaned thumbnail object.
+    pub fn r2_client(&self) -> &R2Client {
+        &self.r2
+    }
+
+    /// Publish a freshly downloaded local file to the library: upload to
+    /// Streamtape, upload thumbnail to R2 (with `getsplash` fallback),
+    /// and insert into the `videos` table.
+    ///
+    /// The local copy is intentionally **left on disk** so the user can
+    /// still download it via `/api/video/file/{token}` after publish —
+    /// see issue #363, where an earlier version of this method deleted
+    /// the file here and broke the "Stáhnout" ready-link as soon as the
+    /// background upload finished. Temp files are reaped by the manual
+    /// `DELETE /api/video/cleanup` endpoint and the future periodic
+    /// cleanup tracked in #192.
+    pub async fn publish_local_video(
+        &self,
+        local_path: &Path,
+        meta: PublishMetadata,
+    ) -> Result<VideoRecord, PublishError> {
+        let display_name = format!("{}.{}", sanitize_for_filename(&meta.title), meta.format_ext);
+
+        // 1) Upload the actual video to Streamtape (the slow step).
+        let uploaded = self
+            .streamtape
+            .upload(local_path, &display_name)
+            .await
+            .inspect_err(|e| tracing::error!("streamtape upload failed: {e}"))?;
+        tracing::info!(
+            "Streamtape upload OK: file_id={} size={}MB",
+            uploaded.file_id,
+            uploaded.size_bytes / (1024 * 1024)
+        );
+
+        // 2) Try to fetch + upload a thumbnail. Failure here is non-fatal:
+        //    we still want the video in the library, just without a thumb.
+        let (thumb_key, thumb_url) = match self
+            .resolve_and_upload_thumbnail(&uploaded.file_id, meta.upstream_thumbnail_url.as_deref())
+            .await
+        {
+            Ok((key, url)) => (Some(key), Some(url)),
+            Err(e) => {
+                tracing::warn!(
+                    "thumbnail upload failed for {}: {e} — continuing without thumbnail",
+                    uploaded.file_id
+                );
+                (None, None)
+            }
+        };
+
+        // 3) Insert into DB.
+        let new = NewVideo {
+            source_url: meta.source_url,
+            title: meta.title,
+            description: meta.description,
+            duration_sec: meta.duration_sec,
+            source_extractor: meta.source_extractor,
+            quality: meta.quality,
+            format_ext: meta.format_ext,
+            streamtape_file_id: uploaded.file_id.clone(),
+            streamtape_url: uploaded.url,
+            file_size_bytes: uploaded.size_bytes as i64,
+            thumbnail_r2_key: thumb_key,
+            thumbnail_url: thumb_url,
+            resolution: meta.resolution,
+        };
+        let id = self.repo.insert(new).await?;
+        let record = self
+            .repo
+            .find_by_id(id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+
+        // 4) Keep the local temp file on disk on purpose — the handler's
+        //    `/api/video/file/{token}` ready-link still points at it and
+        //    needs to succeed after publish finishes (issue #363). The
+        //    file is cleaned up by `DELETE /api/video/cleanup` and the
+        //    future periodic reaper (#192).
+
+        Ok(record)
+    }
+
+    async fn resolve_and_upload_thumbnail(
+        &self,
+        file_id: &str,
+        upstream_url: Option<&str>,
+    ) -> Result<(String, String), PublishError> {
+        // Try the upstream (yt-dlp) thumbnail first; fall back to Streamtape
+        // getsplash. Either way we re-host on R2 so the public URL is on our
+        // domain and unaffected by upstream link rot.
+        let bytes = if let Some(url) = upstream_url {
+            match download_image(&self.http, url).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("upstream thumbnail fetch failed ({url}): {e}");
+                    let splash = self.streamtape.get_splash_url(file_id).await?;
+                    download_image(&self.http, &splash).await?
+                }
+            }
+        } else {
+            let splash = self.streamtape.get_splash_url(file_id).await?;
+            download_image(&self.http, &splash).await?
+        };
+
+        let key = format!("videos/thumbs/{}.jpg", thumbnail_key_hash(file_id, &bytes));
+        let url = self.r2.upload_thumbnail(&key, bytes, "image/jpeg").await?;
+        Ok((key, url))
+    }
+}
+
+async fn download_image(http: &reqwest::Client, url: &str) -> Result<Bytes, PublishError> {
+    let resp = http
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (cr-web video library)")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| PublishError::Streamtape(StreamtapeError::Network(e)))?
+        .error_for_status()
+        .map_err(|e| PublishError::Streamtape(StreamtapeError::Network(e)))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| PublishError::Streamtape(StreamtapeError::Network(e)))?;
+    Ok(bytes)
+}
+
+/// SHA-256 prefix of `file_id || bytes` — short, stable, content-addressed.
+fn thumbnail_key_hash(file_id: &str, bytes: &Bytes) -> String {
+    let mut h = Sha256::new();
+    h.update(file_id.as_bytes());
+    h.update(bytes);
+    let digest = h.finalize();
+    let mut hex = String::with_capacity(16);
+    for b in &digest[..8] {
+        use std::fmt::Write;
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+/// Filesystem-friendly name derived from a video title; the upload
+/// endpoint uses this as the user-visible filename on Streamtape.
+///
+/// ASCII-only allowlist (alphanumerics + space + dash + underscore).
+/// Falls back to `"video"` when the input is empty after sanitisation
+/// — emoji-only or non-ASCII titles would otherwise become an empty
+/// string and Streamtape would receive a nameless file.
+fn sanitize_for_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect();
+    if cleaned.is_empty() {
+        "video".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_for_filename;
+
+    #[test]
+    fn keeps_alphanumerics_and_collapses_whitespace() {
+        assert_eq!(sanitize_for_filename("Matrix (1999)"), "Matrix 1999");
+        assert_eq!(sanitize_for_filename("  hello   world  "), "hello world");
+    }
+
+    #[test]
+    fn emoji_only_title_falls_back_to_video() {
+        assert_eq!(sanitize_for_filename("😭😭😭"), "video");
+    }
+
+    #[test]
+    fn cyrillic_only_title_falls_back_to_video() {
+        // Per Copilot review on PR #336 — non-ASCII letters must be
+        // stripped so the filename is safe in HTTP headers.
+        assert_eq!(sanitize_for_filename("Москва"), "video");
+        assert_eq!(sanitize_for_filename("世界"), "video");
+    }
+
+    #[test]
+    fn empty_title_falls_back_to_video() {
+        assert_eq!(sanitize_for_filename(""), "video");
+        assert_eq!(sanitize_for_filename("   "), "video");
+    }
+
+    #[test]
+    fn truncates_to_80_chars() {
+        let long = "a".repeat(200);
+        let result = sanitize_for_filename(&long);
+        assert_eq!(result.chars().count(), 80);
+    }
+}

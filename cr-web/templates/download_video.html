@@ -1,0 +1,1931 @@
+{% extends "base.html" %}
+
+{% block title %}Stáhnout video{% endblock %}
+
+{% block meta_description %}Stáhněte videa z českých serverů — Seznam Zprávy, Novinky.cz a dalších. Zdarma, bez registrace.{% endblock %}
+
+{% block og_title %}Stáhnout video — ceskarepublika.wiki{% endblock %}
+{% block og_description %}Stáhněte si video z YouTube, Seznam Zpráv, Novinek a dalších serverů. Zdarma, bez registrace, přímo v prohlížeči.{% endblock %}
+{# #367 — og:image without query string. Seznam/Lidé.cz preview
+   scraper historically ignored URLs containing `?` for the og:image
+   fetch ("dynamic content"), even though the file is a plain PNG.
+   Rename the cache buster into the filename instead. #}
+{% block og_image %}http://localhost:3000/static/img/og-stahnout-video-v11.png{% endblock %}
+{# #367 — og:type=article triggers the "big preview card" branch in
+   Seznam/Lidé.cz share renderer. Same trick every Czech news site
+   (Aktualne.cz, Novinky, iDnes) uses — `website` gets the text-only
+   fallback, `article` gets the large image card. #}
+{% block og_type %}article{% endblock %}
+
+{# #367 — Download page doesn't render a map, so skip Leaflet
+   entirely. The ~150 KB synchronous script in <head> was blocking
+   Seznam/Lidé.cz headless-browser preview scraper long enough that
+   it timed out and fell back to a text-only card. #}
+{% block leaflet %}{% endblock %}
+{% block og_extra %}
+<meta property="og:image:secure_url" content="http://localhost:3000/static/img/og-stahnout-video-v11.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Stáhnout video — ceskarepublika.wiki">
+<meta property="og:url" content="http://localhost:3000/stahnout-video/">
+<meta property="og:site_name" content="ceskarepublika.wiki">
+{# #367 — JSON-LD WebPage schema. Some Seznam properties (Lidé.cz
+   comments, Zboží embeds) look at schema.org structured data before
+   falling back to og:*. Having both maximizes the chance the big
+   play+download card renders as a large preview rather than a
+   title-only fallback. #}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  "name": "Stáhnout video — ceskarepublika.wiki",
+  "description": "Stáhněte si video z YouTube, Seznam Zpráv, Novinek a dalších serverů. Zdarma, bez registrace, přímo v prohlížeči.",
+  "url": "http://localhost:3000/stahnout-video/",
+  "inLanguage": "cs-CZ",
+  "isPartOf": {
+    "@type": "WebSite",
+    "name": "ceskarepublika.wiki",
+    "url": "http://localhost:3000/"
+  },
+  "primaryImageOfPage": {
+    "@type": "ImageObject",
+    "url": "http://localhost:3000/static/img/og-stahnout-video-v11.png",
+    "width": 1200,
+    "height": 630
+  },
+  "image": "http://localhost:3000/static/img/og-stahnout-video-v11.png"
+}
+</script>
+{% endblock %}
+
+{% block header_left %}
+<div class="logo-group">
+    <a href="/stahnout-video/" style="display:flex;align-items:center;gap:0.5rem;text-decoration:none;color:inherit;">
+        <img src="/static/img/logo-stahnout-video.svg?v=5"
+            alt="Logo Stáhnout video" title="Stáhnout video" class="header-emblem">
+        <h1>Stáhnout video</h1>
+    </a>
+</div>
+{% endblock %}
+
+{% block header_search %}{% endblock %}
+
+{% block header_right %}
+<div class="context-emblem"></div>
+{% endblock %}
+
+{% block head %}
+<!-- #361 — page-specific SVG favicon (modern browsers pick this up
+     after the global icons in base.html). The ?v= cache buster
+     forces the browser to refetch when we ship a new logo. -->
+<link rel="icon" type="image/svg+xml" href="/static/img/logo-stahnout-video.svg?v=5">
+<!-- #367 — Canonical URL. Seznam/Lidé.cz share preview scraper
+     dereferences canonical before it fetches og:image, so without it
+     the preview falls back to a text-only card (exactly the broken
+     state we observed on Lidé.cz). Every Czech news site that
+     renders a big preview card has this tag. -->
+<link rel="canonical" href="http://localhost:3000/stahnout-video/">
+<!-- Per-page Twitter metadata only — base.html emits default
+     `robots`, `twitter:card` and `twitter:domain` tags, so we don't
+     repeat them here (#371 review). -->
+<meta name="twitter:title" content="Stáhnout video — ceskarepublika.wiki">
+<meta name="twitter:description" content="Stáhněte si video z YouTube, Seznam Zpráv, Novinek a dalších serverů. Zdarma, bez registrace, přímo v prohlížeči.">
+<meta name="twitter:image" content="http://localhost:3000/static/img/og-stahnout-video-v11.png">
+<meta name="twitter:image:alt" content="Stáhnout video — ceskarepublika.wiki">
+<meta name="twitter:url" content="http://localhost:3000/stahnout-video/">
+<style>
+.download-hero {
+    text-align: center;
+    padding: 2.5rem 0 1.5rem;
+}
+.download-hero h2 {
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--color-black);
+}
+.download-hero p {
+    color: #555;
+    margin-top: 0.5rem;
+    font-size: 1.05rem;
+}
+.download-form-card {
+    background: white;
+    border-radius: 12px;
+    box-shadow: var(--shadow-premium);
+    border: 1px solid var(--color-gray-border);
+    padding: 2rem;
+    margin-bottom: 2rem;
+}
+/* #360 — URL input is rendered as a single pill that matches the
+   homepage `.search-container`: a rounded white wrapper with a 2 px
+   gray border, a borderless input inside, and the red Načíst info
+   button snapped to the right with its own inner pill background. */
+.url-input-group {
+    display: flex;
+    align-items: center;
+    border: 2px solid var(--color-gray-border);
+    border-radius: 30px;
+    background: white;
+    padding: 4px;
+    margin-bottom: 1.25rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.url-input-group:focus-within {
+    border-color: var(--color-blue);
+    box-shadow: 0 0 0 3px rgba(17, 69, 126, 0.15);
+}
+.url-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    padding: 0.55rem 1.25rem;
+    font-size: 1rem;
+    font-family: 'Inter', sans-serif;
+    outline: none;
+}
+.url-input::placeholder {
+    color: #aaa;
+}
+.btn-primary {
+    background: var(--color-red);
+    color: white;
+    border: none;
+    border-radius: 25px;
+    padding: 0.6rem 1.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background 0.15s;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.btn-primary:hover {
+    background: var(--color-blue);
+    color: white;
+}
+.btn-primary:disabled {
+    background: #ccc;
+    cursor: default;
+}
+.quality-selector {
+    display: none;
+    gap: 0.5rem;
+    margin-bottom: 1.25rem;
+    flex-wrap: wrap;
+}
+.quality-selector.visible {
+    display: flex;
+}
+.quality-btn {
+    padding: 0.4rem 0.9rem;
+    border: 2px solid var(--color-gray-border);
+    border-radius: 20px;
+    background: white;
+    font-size: 0.85rem;
+    font-weight: 500;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    color: #555;
+}
+.quality-btn.active {
+    border-color: var(--color-gold);
+    background: var(--color-gold);
+    color: white;
+}
+.quality-btn:hover:not(.active) {
+    border-color: var(--color-gold);
+    color: var(--color-gold);
+}
+.quality-btn.whatsapp {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+.quality-btn.whatsapp img {
+    height: 14px;
+    width: 14px;
+}
+.whatsapp-parts-note {
+    font-size: 0.75rem;
+    color: #888;
+}
+/* #366 — container selector row. Same pill buttons as the quality
+   selector but nested in its own hidden container that only lights
+   up once `Načíst info` has populated the quality buttons. */
+.format-selector {
+    display: none;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1.25rem;
+    flex-wrap: wrap;
+}
+.format-selector.visible {
+    display: flex;
+}
+.format-selector-label {
+    font-size: 0.8rem;
+    color: #555;
+    font-weight: 500;
+    margin-right: 0.25rem;
+}
+.format-btn {
+    padding: 0.4rem 0.9rem;
+    border: 2px solid var(--color-gray-border);
+    border-radius: 20px;
+    background: white;
+    font-size: 0.85rem;
+    font-weight: 500;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    color: #555;
+}
+.format-btn.active {
+    border-color: var(--color-gold);
+    background: var(--color-gold);
+    color: white;
+}
+.format-btn:hover:not(.active) {
+    border-color: var(--color-gold);
+    color: var(--color-gold);
+}
+/* Preview card */
+.video-preview {
+    display: none;
+    background: #f8fafc;
+    border-radius: 10px;
+    border: 1px solid var(--color-gray-border);
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+.video-preview.visible {
+    display: flex;
+    gap: 1.25rem;
+}
+.preview-thumb {
+    width: 200px;
+    height: 112px;
+    border-radius: 8px;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: #e8e8e8;
+}
+.preview-info {
+    flex: 1;
+    min-width: 0;
+}
+.preview-info h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--color-black);
+    margin-bottom: 0.35rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.preview-meta {
+    color: #666;
+    font-size: 0.88rem;
+    line-height: 1.7;
+}
+.preview-meta strong {
+    color: var(--color-black);
+}
+/* Status / loading */
+.status-message {
+    display: none;
+    text-align: center;
+    padding: 1rem;
+    font-size: 0.95rem;
+    color: #555;
+}
+.status-message.visible {
+    display: block;
+}
+.status-message.error {
+    color: var(--color-red);
+}
+.spinner {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--color-gray-border);
+    border-top-color: var(--color-blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 0.5rem;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+/* Download button */
+.download-actions {
+    display: none;
+    text-align: center;
+    padding-top: 0.5rem;
+}
+.download-actions.visible {
+    display: block;
+}
+.btn-download {
+    background: var(--color-red);
+    color: white;
+    border: none;
+    border-radius: 24px;
+    padding: 0.85rem 2.5rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.btn-download:hover {
+    background: #b5141a;
+}
+.btn-download:disabled {
+    background: #ccc;
+    cursor: default;
+}
+/* Supported services */
+.supported-services {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    justify-content: center;
+    align-items: center;
+    padding: 1rem 0 2rem;
+}
+.service-link {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    text-decoration: none;
+    color: #555;
+    font-size: 0.85rem;
+    font-weight: 500;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+.service-link:hover {
+    opacity: 1;
+}
+.service-link.supported {
+    opacity: 1;
+    font-weight: 600;
+    color: var(--color-black);
+}
+.service-logo {
+    height: 20px;
+    width: auto;
+}
+@media (max-width: 600px) {
+    /* The URL pill stays horizontal on narrow screens — the original
+       (#360) acceptance criterion said "stack cleanly" but stacking a
+       pill-shaped container vertically would split the shared border
+       and break the visual match with the homepage search bar. We
+       keep input + button in one row, shrink padding / font-size so
+       both fit on a 320 px viewport, and rely on .url-input's
+       `min-width: 0` to let long URLs scroll inside the field. The
+       button keeps its 44 px tap target via the rem padding. */
+    .url-input { padding: 0.5rem 0.75rem; font-size: 0.9rem; }
+    .btn-primary { padding: 0.55rem 0.85rem; font-size: 0.85rem; }
+    .video-preview.visible { flex-direction: column; }
+    .preview-thumb { width: 100%; height: auto; aspect-ratio: 16/9; }
+    .download-hero h2 { font-size: 1.5rem; }
+}
+.download-ready-link {
+    color: var(--color-link);
+    text-decoration: none;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: color 0.2s;
+}
+.download-arrow {
+    color: var(--color-gold);
+    transition: color 0.2s;
+}
+.download-fname {
+    transition: all 0.2s;
+}
+.download-size {
+    color: #888;
+    font-weight: 400;
+    font-size: 0.9rem;
+}
+.download-ready-link:hover {
+    color: var(--color-blue);
+}
+.download-ready-link:hover .download-arrow {
+    color: var(--color-blue);
+}
+.download-ready-link:hover .download-fname {
+    text-decoration: underline;
+    text-decoration-color: var(--color-blue);
+}
+/* --- #322 Video library grid --- */
+.library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 1rem;
+}
+.library-card {
+    background: white;
+    border: 1px solid var(--color-gray-border);
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: box-shadow 0.15s, transform 0.15s;
+}
+.library-card:hover {
+    box-shadow: 0 6px 14px rgba(17, 69, 126, 0.12);
+    transform: translateY(-2px);
+}
+.library-thumb {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background: #e8e8e8;
+    cursor: pointer;
+    overflow: hidden;
+}
+.library-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+/* #358 — always-visible (dimmed) play badge centred on the thumbnail.
+   Without this, users were pressing the audio mini-player below
+   thinking it would play the *video*. The badge is a circular dark
+   translucent disc with a white play triangle inside; default state
+   is dimmed (opacity 0.7), hover brightens it and darkens the disc
+   so it is obvious the thumbnail is interactive and will play the
+   actual video clip. */
+.library-thumb .play-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    opacity: 0.7;
+    transition: opacity 0.15s, background 0.15s, transform 0.15s;
+    pointer-events: none;
+}
+.library-thumb .play-overlay svg {
+    width: 28px;
+    height: 28px;
+    fill: currentColor;
+    /* Optical centering — the SVG triangle's centroid is offset
+       right of its bounding-box centre (the apex sticks out to the
+       right), so the bounding box itself needs to shift right to
+       make the triangle appear centred. 2 px to the right pulls the
+       perceived weight of the triangle back to the badge centre. */
+    margin-left: 2px;
+    display: block;
+}
+.library-thumb:hover .play-overlay {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.75);
+    transform: translate(-50%, -50%) scale(1.05);
+}
+.library-quality-badge {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 0.15rem 0.5rem;
+    border-radius: 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.library-info {
+    padding: 0.75rem;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.library-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-black);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.library-meta {
+    font-size: 0.78rem;
+    color: #888;
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+.library-btn {
+    flex: 1;
+    background: var(--color-blue);
+    color: white;
+    border: none;
+    border-radius: 18px;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: background 0.15s;
+    text-decoration: none;
+    text-align: center;
+}
+.library-btn:hover { background: #0d3962; }
+.library-btn.danger {
+    background: transparent;
+    color: var(--color-red);
+    border: 1px solid var(--color-red);
+    flex: 0 0 auto;
+    padding: 0.45rem 0.7rem;
+}
+.library-btn.danger:hover { background: var(--color-red); color: white; }
+.library-card.playing .library-thumb { display: none; }
+.library-card.playing video {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    display: block;
+    background: black;
+}
+/* #350/#351/#352 — permanent custom audio mini-player on every card.
+   Native <audio controls> ships a tiny scrub bar that is impossible to
+   drag with a finger; we render our own ▶/⏸ + time + a wide range
+   slider on its own row so seeking inside an hour-long podcast feels
+   natural on mobile. The underlying <audio> element stays in the DOM
+   (display:none) so Media Session API + lock-screen artwork still work. */
+.library-audio-mini {
+    margin-top: auto;
+    padding: 0.65rem 0.7rem 0.75rem;
+    background: #f8fafc;
+    border-top: 1px solid var(--color-gray-border);
+    border-radius: 0 0 11px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+.library-audio-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #555;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+.library-audio-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+/* #355 — minimalist control buttons that look like a stripped-down
+   native <audio controls> bar. Default state is just a black SVG
+   icon with no background; on :hover a soft circular ring fades in
+   so the click target is obvious. The same .library-audio-iconbtn
+   class powers both the play/pause toggle and the mute toggle. */
+.library-audio-iconbtn {
+    width: 32px;
+    height: 32px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: #1f2937;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s, transform 0.1s;
+    padding: 0;
+}
+.library-audio-iconbtn:hover { background: rgba(0, 0, 0, 0.08); }
+.library-audio-iconbtn:active { transform: scale(0.94); }
+.library-audio-iconbtn:focus-visible {
+    outline: 2px solid var(--color-blue);
+    outline-offset: 2px;
+}
+.library-audio-iconbtn svg {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+    display: block;
+}
+.library-audio-spacer { flex: 1 1 auto; }
+/* Volume control: speaker icon + slim horizontal slider that fades in
+   when the user hovers over the speaker (mirrors how the native
+   HTML5 <audio controls> bar reveals its volume slider). */
+.library-audio-volume-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+.library-audio-volume {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 0;
+    max-width: 0;
+    height: 24px;
+    background: transparent;
+    margin: 0;
+    padding: 0;
+    cursor: pointer;
+    opacity: 0;
+    overflow: hidden;
+    transition: width 0.18s ease, max-width 0.18s ease, opacity 0.18s ease;
+    touch-action: manipulation;
+}
+.library-audio-volume-wrap:hover .library-audio-volume,
+.library-audio-volume-wrap:focus-within .library-audio-volume {
+    width: 64px;
+    max-width: 64px;
+    opacity: 1;
+}
+.library-audio-volume:focus { outline: none; }
+.library-audio-volume:focus-visible {
+    outline: 2px solid var(--color-blue);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+.library-audio-volume::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(
+        to right,
+        #1f2937 0%,
+        #1f2937 var(--vol-progress, 100%),
+        #d1d5db var(--vol-progress, 100%),
+        #d1d5db 100%
+    );
+}
+.library-audio-volume::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: #d1d5db;
+}
+.library-audio-volume::-moz-range-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: #1f2937;
+}
+.library-audio-volume::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #1f2937;
+    border: none;
+    margin-top: -4px;
+    cursor: pointer;
+}
+.library-audio-volume::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #1f2937;
+    border: none;
+    cursor: pointer;
+}
+.library-audio-time {
+    font-size: 0.85rem;
+    color: #555;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    white-space: nowrap;
+}
+.library-audio-range {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 36px;
+    background: transparent;
+    margin: 0;
+    padding: 0;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.library-audio-range:focus { outline: none; }
+.library-audio-range:focus-visible {
+    outline: 2px solid var(--color-blue);
+    outline-offset: 4px;
+    border-radius: 6px;
+}
+/* #355 — neutral gray slider that matches the minimal player. The
+   filled portion uses a slightly darker gray than the empty track so
+   you can see the playback progress without resorting to brand
+   colours. The thumb is solid dark gray (no border, no shadow halo)
+   and stays 24×24 px so it remains finger-friendly on mobile. */
+.library-audio-range::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 3px;
+    background: linear-gradient(
+        to right,
+        #6b7280 0%,
+        #6b7280 var(--progress, 0%),
+        #e5e7eb var(--progress, 0%),
+        #e5e7eb 100%
+    );
+}
+.library-audio-range::-moz-range-track {
+    height: 6px;
+    border-radius: 3px;
+    background: #e5e7eb;
+}
+.library-audio-range::-moz-range-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: #6b7280;
+}
+/* Thumb is transparent by default — the empty/filled track halves
+   already show progress. The dark dot only appears on hover, focus,
+   or active drag, mirroring the native HTML5 audio control. The
+   24×24 hit-box stays so the click target remains finger-friendly. */
+.library-audio-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: transparent;
+    border: none;
+    margin-top: -9px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.library-audio-range::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.library-audio-range:hover::-webkit-slider-thumb,
+.library-audio-range:focus-visible::-webkit-slider-thumb,
+.library-audio-range:active::-webkit-slider-thumb {
+    background: #1f2937;
+}
+.library-audio-range:hover::-moz-range-thumb,
+.library-audio-range:focus-visible::-moz-range-thumb,
+.library-audio-range:active::-moz-range-thumb {
+    background: #1f2937;
+}
+.library-audio-element { display: none; }
+/* #342 — fade-in for cards prepended after a fresh preparation. */
+.library-card-fadein {
+    animation: library-card-fadein 0.45s ease-out;
+}
+@keyframes library-card-fadein {
+    from { opacity: 0; transform: translateY(-12px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+</style>
+{% endblock %}
+
+{% block breadcrumb %}
+<nav class="breadcrumbs" style="padding-top: 2rem; border: none; margin: 0;">
+    <a href="/">Česká republika</a> &raquo; <span>Stáhnout video</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<section class="download-hero">
+    <h2>Stáhnout video</h2>
+    <p>Vložte odkaz na video z českých i zahraničních serverů</p>
+</section>
+
+<div class="download-form-card">
+    <div class="url-input-group">
+        <label for="video-url" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">URL videa</label>
+        <input type="url" inputmode="url" class="url-input" id="video-url" name="url"
+               placeholder="https://www.seznamzpravy.cz/clanek/&hellip;"
+               autocomplete="off" spellcheck="false">
+        <button class="btn-primary" id="btn-fetch-info">Načíst info</button>
+    </div>
+
+    <div class="quality-selector" id="quality-selector">
+    </div>
+
+    <!-- #366 — container format picker. Hidden until `Načíst info`
+         populates the preview, hidden again once the ready-link is
+         shown (picking a new format is meaningless after the current
+         download finished). The JS auto-selects whichever container
+         matches the source extension reported by yt-dlp so that
+         no-conversion downloads are the default path. -->
+    <div class="format-selector" id="format-selector">
+        <span class="format-selector-label">Formát:</span>
+        <button type="button" class="format-btn active" data-container="mp4">MP4</button>
+        <button type="button" class="format-btn" data-container="webm">WebM</button>
+        <button type="button" class="format-btn" data-container="mkv">MKV</button>
+    </div>
+
+    <div class="video-preview" id="video-preview">
+        <img class="preview-thumb" id="preview-thumb" src="" alt="" width="200" height="112">
+        <div class="preview-info">
+            <h3 id="preview-title"></h3>
+            <div class="preview-meta">
+                <strong>Zdroj:</strong> <span id="preview-source"></span><br>
+                <strong>Délka:</strong> <span id="preview-duration"></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="status-message" id="status-message"><span class="spinner" id="status-spinner" style="display:none;"></span> <span id="status-text"></span></div>
+
+    <div class="download-actions" id="download-actions">
+        <button class="btn-download" id="btn-download" title="Stáhnout video na server, převést a připravit ke stažení / přehrání">Připravit ke stažení</button>
+    </div>
+</div>
+
+<!-- #322 Library of videos hosted on Streamtape: thumbnail + title +
+     inline play + Stáhnout (proxied through cr-web). Public read-only —
+     no delete from the public UI. -->
+<div class="video-library" id="video-library" style="display:none;margin-top:1.5rem;">
+    <h3 style="font-size:1rem;font-weight:700;color:var(--color-black);margin-bottom:0.75rem;">Stažená videa</h3>
+    <div class="library-grid" id="library-grid"></div>
+</div>
+
+<div class="supported-services">
+    <a href="https://tv.nova.cz" target="_blank" rel="nofollow noopener noreferrer" class="service-link supported">
+        <img src="/static/img/services/nova-cz.svg" alt="Logo Nova.cz" title="Nova.cz (TV Nova)" class="service-logo" height="20">
+    </a>
+    <a href="https://www.seznamzpravy.cz" target="_blank" rel="nofollow noopener noreferrer" class="service-link supported">
+        <img src="/static/img/services/seznam-zpravy.svg" alt="Logo Seznam Zprávy" title="Seznam Zprávy" class="service-logo" height="20">
+    </a>
+    <a href="https://www.novinky.cz" target="_blank" rel="nofollow noopener noreferrer" class="service-link supported">
+        <img src="/static/img/services/novinky-cz.svg" alt="Logo Novinky.cz" title="Novinky.cz" class="service-logo" height="20">
+    </a>
+    <a href="https://www.stream.cz" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/stream-cz.svg" alt="Logo Stream.cz" title="Stream.cz" class="service-logo" height="20">
+    </a>
+    <a href="https://www.youtube.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/youtube.svg" alt="Logo YouTube" title="YouTube" class="service-logo" height="20">
+    </a>
+    <a href="https://www.facebook.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/facebook.svg" alt="Logo Facebook" title="Facebook" class="service-logo" height="20">
+    </a>
+    <a href="https://x.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/x-com.svg" alt="Logo X.com" title="X.com (Twitter)" class="service-logo" height="20">
+    </a>
+    <a href="https://www.instagram.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/instagram.svg" alt="Logo Instagram" title="Instagram" class="service-logo" height="20">
+    </a>
+    <a href="https://www.tiktok.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/tiktok.svg" alt="Logo TikTok" title="TikTok" class="service-logo" height="20">
+    </a>
+    <a href="https://www.reddit.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/reddit.svg" alt="Logo Reddit" title="Reddit" class="service-logo" height="20">
+    </a>
+    <a href="https://www.vimeo.com" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/vimeo.svg" alt="Logo Vimeo" title="Vimeo" class="service-logo" height="20">
+    </a>
+    <a href="https://www.twitch.tv" target="_blank" rel="nofollow noopener noreferrer" class="service-link">
+        <img src="/static/img/services/twitch.svg" alt="Logo Twitch" title="Twitch" class="service-logo" height="20">
+    </a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var urlInput = document.getElementById('video-url');
+    var btnFetch = document.getElementById('btn-fetch-info');
+    var btnDownload = document.getElementById('btn-download');
+    var previewEl = document.getElementById('video-preview');
+    var statusEl = document.getElementById('status-message');
+    var actionsEl = document.getElementById('download-actions');
+    var qualityEl = document.getElementById('quality-selector');
+    var formatEl = document.getElementById('format-selector');
+    var selectedFormat = 'video';
+    var selectedQuality = 'best';
+    // #366 — output container. Re-initialised from the source format
+    // on every successful `Načíst info` so the no-conversion path
+    // (same container as the source) is always the default.
+    var selectedContainer = 'mp4';
+
+    // #366 — map a yt-dlp `ext` value reported for one of the source
+    // formats to the closest supported output container. Anything we
+    // don't know about collapses to MP4 which is universally playable.
+    function extToContainer(ext) {
+        if (!ext) return null;
+        var lower = String(ext).toLowerCase();
+        if (lower === 'mp4' || lower === 'm4a' || lower === 'mov') return 'mp4';
+        if (lower === 'webm') return 'webm';
+        if (lower === 'mkv' || lower === 'matroska') return 'mkv';
+        return null;
+    }
+
+    // #366 — set the active format button from outside the click
+    // handler. Used both by the button's own click flow and by the
+    // auto-default that fires on `Načíst info` success.
+    function setSelectedContainer(container) {
+        if (!container || container === selectedContainer) {
+            return false;
+        }
+        selectedContainer = container;
+        Array.prototype.forEach.call(formatEl.querySelectorAll('.format-btn'), function(b) {
+            b.classList.toggle('active', b.getAttribute('data-container') === container);
+        });
+        return true;
+    }
+
+    // Wire up container buttons once. The row stays in the DOM —
+    // only its visibility flips with the surrounding workflow.
+    Array.prototype.forEach.call(formatEl.querySelectorAll('.format-btn'), function(btn) {
+        btn.addEventListener('click', function() {
+            var container = btn.getAttribute('data-container');
+            if (!setSelectedContainer(container)) return;
+            // Switching formats invalidates any previously displayed
+            // ready-link because the file on disk is a different
+            // container. Hide it and re-show the Stáhnout button so
+            // the user can re-run the prepare step in the new format.
+            resetReadyDownload();
+        });
+    });
+
+    // #366 — pick the default output container from the formats yt-dlp
+    // reports for the source. If any format lives in MP4 we default to
+    // MP4 (most universal), otherwise WebM (YouTube-style VP9/Opus),
+    // otherwise MKV as a Swiss-army fallback.
+    function pickDefaultContainerFromFormats(formats) {
+        if (!Array.isArray(formats) || formats.length === 0) return 'mp4';
+        var mapped = formats
+            .map(function(f) { return extToContainer(f && f.ext); })
+            .filter(Boolean);
+        if (mapped.indexOf('mp4') !== -1) return 'mp4';
+        if (mapped.indexOf('webm') !== -1) return 'webm';
+        if (mapped.indexOf('mkv') !== -1) return 'mkv';
+        return 'mp4';
+    }
+
+    // Fetch info
+    btnFetch.addEventListener('click', function() {
+        var url = urlInput.value.trim();
+        if (!url) {
+            showStatus('Vložte odkaz na video.', true);
+            return;
+        }
+        if (!url.startsWith('http')) {
+            url = 'https://' + url;
+            urlInput.value = url;
+        }
+
+        showStatus('Načítám informace o videu\u2026', false, true);
+        previewEl.classList.remove('visible');
+        actionsEl.classList.remove('visible');
+        qualityEl.classList.remove('visible');
+        qualityEl.innerHTML = '';
+        // #366 — hide the format selector while the fetch is pending
+        // (no preview → no meaningful format choice) and wait for the
+        // success branch to re-show it after we know which container
+        // the source uses.
+        formatEl.classList.remove('visible');
+        selectedQuality = 'best';
+        btnDownload.style.display = '';
+        btnDownload.disabled = false;
+        btnFetch.disabled = true;
+
+        fetch('/api/video/info', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        })
+        .then(function(r) {
+            if (!r.ok) {
+                return r.json().then(function(err) {
+                    throw new Error(err.error || 'Server vrátil chybu ' + r.status);
+                }).catch(function(e) {
+                    if (e.message && !e.message.startsWith('Server vrátil')) throw e;
+                    throw new Error('Server vrátil chybu ' + r.status);
+                });
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            document.getElementById('preview-title').textContent = data.title || 'Bez názvu';
+            document.getElementById('preview-source').textContent = data.uploader || data.extractor || extractDomain(url);
+            document.getElementById('preview-duration').textContent = formatDuration(data.duration);
+            var thumb = document.getElementById('preview-thumb');
+            if (data.thumbnail) {
+                thumb.src = data.thumbnail;
+                thumb.alt = data.title || '';
+            }
+            previewEl.classList.add('visible');
+            actionsEl.classList.add('visible');
+            formatEl.classList.add('visible');
+            hideStatus();
+
+            // #366 — auto-pick the output container that matches the
+            // source, so "download without conversion" is the default
+            // path. Source-MP4 → MP4, source-WebM → WebM, etc.
+            setSelectedContainer(
+                pickDefaultContainerFromFormats(data.formats)
+            );
+
+            // Update quality buttons from available formats
+            if (data.formats && data.formats.length > 0) {
+                updateQualityButtons(data.formats, data.whatsapp_parts || 1);
+            }
+        })
+        .catch(function(err) {
+            showStatus('Nepodařilo se načíst info: ' + err.message, true);
+        })
+        .finally(function() {
+            btnFetch.disabled = false;
+        });
+    });
+
+    // Download (async: prepare returns immediately, then poll status)
+    btnDownload.addEventListener('click', function() {
+        var url = urlInput.value.trim();
+        if (!url) return;
+
+        showStatus('Připravuji stažení\u2026', false, true);
+        btnDownload.style.display = 'none';
+
+        fetch('/api/video/prepare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                url: url,
+                format: selectedFormat,
+                quality: selectedQuality,
+                container: selectedContainer
+            })
+        })
+        .then(function(r) {
+            if (!r.ok) {
+                return r.json().then(function(err) {
+                    throw new Error(err.error || 'Server vrátil chybu ' + r.status);
+                }).catch(function() {
+                    throw new Error('Server vrátil chybu ' + r.status);
+                });
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            showStatus('Stahuji video na serveru\u2026 0 %', false, true);
+            pollDownloadStatus(data.token);
+        })
+        .catch(function(err) {
+            showStatus('Stažení se nezdařilo: ' + err.message, true);
+            btnDownload.disabled = false;
+        });
+    });
+
+    function pollDownloadStatus(token) {
+        function pollOnce() {
+            fetch('/api/video/status/' + token)
+            .then(function(r) {
+                if (!r.ok) {
+                    return r.json().then(function(err) {
+                        throw new Error(err.error || 'Server vrátil chybu ' + r.status);
+                    }).catch(function(e) {
+                        if (e instanceof Error) throw e;
+                        throw new Error('Server vrátil chybu ' + r.status);
+                    });
+                }
+                return r.json();
+            })
+            .then(function(status) {
+                if (status.status === 'ready') {
+                    showSingleDownload(token, status);
+                } else if (status.status === 'ready_parts') {
+                    showMultiPartDownload(token, status.parts);
+                } else if (status.status === 'failed') {
+                    showStatus(status.error || 'Stažení se nezdařilo.', true);
+                    btnDownload.style.display = '';
+                    btnDownload.disabled = false;
+                } else if (status.status === 'converting') {
+                    var pct = status.progress_percent || 0;
+                    showStatus('Konvertuji pro WhatsApp\u2026 ' + pct + ' %', false, true);
+                    setTimeout(pollOnce, 3000);
+                } else {
+                    var pct = status.progress_percent || 0;
+                    showStatus('Stahuji video na serveru\u2026 ' + pct + ' %', false, true);
+                    setTimeout(pollOnce, 3000);
+                }
+            })
+            .catch(function(err) {
+                showStatus('Stažení se nezdařilo: ' + err.message, true);
+                btnDownload.style.display = '';
+                btnDownload.disabled = false;
+            });
+        }
+        pollOnce();
+    }
+
+    // Enter key in input
+    urlInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            btnFetch.click();
+        }
+    });
+
+    // #359 — Auto-trigger Načíst info on paste. 99 % of users paste
+    // a URL from the clipboard and immediately want the metadata
+    // fetch to run; making them press Enter or click the button is
+    // friction. We defer to the next tick so the browser has time
+    // to populate `urlInput.value` from the paste event, then check
+    // that the trimmed value looks like an http(s) URL before firing
+    // the fetch — that way pasting plain text by mistake stays inert.
+    urlInput.addEventListener('paste', function() {
+        setTimeout(function() {
+            var url = urlInput.value.trim();
+            if (/^https?:\/\//i.test(url)) {
+                btnFetch.click();
+            }
+        }, 0);
+    });
+
+    var statusSpinner = document.getElementById('status-spinner');
+    var statusText = document.getElementById('status-text');
+
+    function resetStatusEl() {
+        statusEl.textContent = '';
+        statusEl.style.display = '';
+        statusEl.style.color = '';
+        statusEl.appendChild(statusSpinner);
+        statusEl.appendChild(document.createTextNode(' '));
+        statusEl.appendChild(statusText);
+    }
+
+    function showStatus(text, isError, loading) {
+        if (!statusEl.contains(statusSpinner)) {
+            resetStatusEl();
+        }
+        statusText.textContent = text;
+        statusSpinner.style.display = loading ? 'inline-block' : 'none';
+        statusEl.classList.add('visible');
+        statusEl.classList.toggle('error', !!isError);
+    }
+
+    function hideStatus() {
+        if (!statusEl.contains(statusSpinner)) {
+            resetStatusEl();
+        }
+        statusEl.classList.remove('visible');
+        statusEl.classList.remove('error');
+        statusEl.style.display = '';
+    }
+
+    // After a successful download a ready-link is shown in statusEl and the
+    // Stáhnout button is hidden. If the user then switches quality, the old
+    // file is no longer what they want — clear the stale link and bring back
+    // the Stáhnout button so they can re-download in the new quality.
+    // #366 — also re-show the format selector because the user is back in
+    // pre-download mode and a new format choice is once again meaningful.
+    function resetReadyDownload() {
+        if (statusEl.querySelector('.download-ready-link')) {
+            hideStatus();
+            btnDownload.style.display = '';
+            btnDownload.disabled = false;
+            if (previewEl.classList.contains('visible')) {
+                formatEl.classList.add('visible');
+            }
+        }
+    }
+
+    function formatDuration(seconds) {
+        if (!seconds) return 'neznámá';
+        var h = Math.floor(seconds / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
+        var s = Math.floor(seconds % 60);
+        if (h > 0) return h + ':' + pad(m) + ':' + pad(s);
+        return m + ':' + pad(s);
+    }
+
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+    function extractDomain(url) {
+        try { return new URL(url).hostname.replace('www.', ''); }
+        catch(e) { return url; }
+    }
+
+    function updateQualityButtons(formats, whatsappParts) {
+        var container = document.getElementById('quality-selector');
+        container.innerHTML = '';
+
+        // Sort by resolution height (ascending) so highest is last
+        var sorted = formats.slice().sort(function(a, b) {
+            var aH = parseInt(a.resolution, 10) || 0;
+            var bH = parseInt(b.resolution, 10) || 0;
+            return aH - bH;
+        });
+
+        sorted.forEach(function(fmt) {
+            var btn = document.createElement('button');
+            btn.className = 'quality-btn';
+            btn.setAttribute('data-quality', fmt.format_id);
+            btn.textContent = fmt.resolution;
+            var h = parseInt(fmt.resolution, 10) || 0;
+            if (h >= 1080) {
+                btn.title = fmt.resolution + ' \u2014 Full HD, velk\u00fd soubor';
+            } else if (h >= 720) {
+                btn.title = fmt.resolution + ' \u2014 HD kvalita';
+            } else if (h >= 480) {
+                btn.title = fmt.resolution + ' \u2014 SD kvalita, men\u0161\u00ed soubor';
+            } else {
+                btn.title = fmt.resolution + ' \u2014 n\u00edzk\u00e9 rozli\u0161en\u00ed, nejmen\u0161\u00ed soubor';
+            }
+            btn.addEventListener('click', function() {
+                if (selectedQuality !== fmt.format_id) {
+                    resetReadyDownload();
+                }
+                document.querySelectorAll('.quality-btn').forEach(function(b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+                selectedQuality = fmt.format_id;
+                // #366 — regular quality picks bring the format
+                // selector back; WhatsApp pick hides it (see below).
+                if (previewEl.classList.contains('visible')) {
+                    formatEl.classList.add('visible');
+                }
+            });
+            container.appendChild(btn);
+        });
+
+        // Add WhatsApp button — looks like other quality buttons but with WA icon
+        var waBtn = document.createElement('button');
+        waBtn.className = 'quality-btn whatsapp';
+        waBtn.setAttribute('data-quality', 'whatsapp');
+        var waImg = document.createElement('img');
+        waImg.src = '/static/img/services/whatsapp.svg';
+        waImg.alt = 'WhatsApp';
+        waBtn.appendChild(waImg);
+        var waLabel = '\u2264480p';
+        if (whatsappParts > 1) {
+            waLabel += ' (' + whatsappParts + '\u00d7)';
+        }
+        waBtn.appendChild(document.createTextNode(' ' + waLabel));
+        waBtn.title = 'WhatsApp \u2014 max 16 MB, H.264' + (whatsappParts > 1 ? ', ' + whatsappParts + ' \u010d\u00e1st\u00ed' : '');
+        waBtn.addEventListener('click', function() {
+            if (selectedQuality !== 'whatsapp') {
+                resetReadyDownload();
+            }
+            document.querySelectorAll('.quality-btn').forEach(function(b) { b.classList.remove('active'); });
+            waBtn.classList.add('active');
+            selectedQuality = 'whatsapp';
+            // #366 — WhatsApp only reliably accepts H.264/AAC MP4
+            // (no WebM / MKV / VP9 / AV1 playback on mobile client).
+            // `convert_for_whatsapp` always produces MP4 regardless
+            // of what the user clicked in the format selector, so
+            // offering WebM/MKV here would be misleading. Hide the
+            // selector while WhatsApp is active; the regular quality
+            // click handlers above bring it back.
+            formatEl.classList.remove('visible');
+            // Also force the internal container state back to mp4 so
+            // any stray reference (e.g. a re-click on Stáhnout
+            // without touching the selector) uses the right value.
+            setSelectedContainer('mp4');
+        });
+        container.appendChild(waBtn);
+
+        // Show the quality selector now that we have formats
+        container.classList.add('visible');
+
+        // Select the best quality by default (last resolution, not WhatsApp)
+        var resButtons = container.querySelectorAll('.quality-btn:not(.whatsapp)');
+        if (resButtons.length > 0) {
+            var best = resButtons[resButtons.length - 1];
+            best.classList.add('active');
+            selectedQuality = best.getAttribute('data-quality');
+        }
+    }
+
+    function showSingleDownload(token, status) {
+        var fname = status.filename || 'video.mp4';
+        var fileUrl = '/api/video/file/' + token;
+        btnDownload.style.display = 'none';
+        // #366 — workflow for this URL is done; the format choice no
+        // longer applies to anything until the user fetches a new URL.
+        formatEl.classList.remove('visible');
+        var readyLink = document.createElement('a');
+        readyLink.href = fileUrl;
+        readyLink.download = fname;
+        readyLink.className = 'download-ready-link';
+        var arrowSpan = document.createElement('span');
+        arrowSpan.className = 'download-arrow';
+        arrowSpan.textContent = '\u2B07';
+        readyLink.appendChild(arrowSpan);
+        readyLink.appendChild(document.createTextNode(' '));
+        var fnameSpan = document.createElement('span');
+        fnameSpan.className = 'download-fname';
+        fnameSpan.textContent = fname;
+        readyLink.appendChild(fnameSpan);
+        readyLink.appendChild(document.createTextNode(' '));
+        var sizeSpan = document.createElement('span');
+        sizeSpan.className = 'download-size';
+        sizeSpan.textContent = '(' + (status.size_mb || '?') + ' MB)';
+        readyLink.appendChild(sizeSpan);
+        statusEl.textContent = '';
+        statusEl.appendChild(readyLink);
+        statusEl.style.display = 'block';
+        statusEl.style.color = '';
+        // No auto-download (#341): the user clicks the ready-link if they
+        // want the file, otherwise they can play it inline from the
+        // library card that prepends below (#342).
+        scheduleLibraryRefresh();
+    }
+
+    function showMultiPartDownload(token, parts) {
+        btnDownload.style.display = 'none';
+        // #366 — same as the single-download path: this URL is done.
+        formatEl.classList.remove('visible');
+        statusEl.textContent = '';
+        statusEl.style.display = 'block';
+        statusEl.style.color = '';
+        var wrapper = document.createElement('div');
+        wrapper.style.textAlign = 'left';
+        wrapper.style.display = 'inline-block';
+        parts.forEach(function(part) {
+            var fileUrl = '/api/video/file/' + token + '/' + part.index;
+            var link = document.createElement('a');
+            link.href = fileUrl;
+            link.download = part.filename;
+            link.className = 'download-ready-link';
+            link.style.display = 'block';
+            link.style.marginBottom = '0.5rem';
+            var arrow = document.createElement('span');
+            arrow.className = 'download-arrow';
+            arrow.textContent = '\u2B07';
+            link.appendChild(arrow);
+            link.appendChild(document.createTextNode(' '));
+            var fnameSpan = document.createElement('span');
+            fnameSpan.className = 'download-fname';
+            fnameSpan.textContent = part.filename;
+            link.appendChild(fnameSpan);
+            link.appendChild(document.createTextNode(' '));
+            var sizeSpan = document.createElement('span');
+            sizeSpan.className = 'download-size';
+            sizeSpan.textContent = '(' + part.size_mb + ' MB)';
+            link.appendChild(sizeSpan);
+            wrapper.appendChild(link);
+        });
+        statusEl.appendChild(wrapper);
+        scheduleLibraryRefresh();
+    }
+
+    // --- #322 Video library grid ---
+    // Track which library ids are already rendered so refresh-after-prepare
+    // can spot the new entry, render it with a fade-in animation, and avoid
+    // re-creating cards the user is already interacting with.
+    var renderedLibraryIds = new Set();
+
+    function loadRecent() { loadLibrary(); }
+
+    function loadLibrary() {
+        return fetch('/api/video/library')
+            .then(function(r) { return r.json(); })
+            .then(function(items) {
+                var container = document.getElementById('video-library');
+                var grid = document.getElementById('library-grid');
+                // Empty / invalid response: drop everything we had cached
+                // so a later refetch can rebuild from a clean baseline.
+                // Without this reset, deleting the last library row would
+                // leave stale cards rendered in the DOM forever.
+                if (!Array.isArray(items) || items.length === 0) {
+                    grid.innerHTML = '';
+                    renderedLibraryIds.clear();
+                    container.style.display = 'none';
+                    return [];
+                }
+                // First load: render everything fresh.
+                if (renderedLibraryIds.size === 0) {
+                    grid.innerHTML = '';
+                    items.forEach(function(item) {
+                        grid.appendChild(buildLibraryCard(item));
+                        renderedLibraryIds.add(item.id);
+                    });
+                    container.style.display = 'block';
+                    return items;
+                }
+                // Subsequent refreshes: prepend any items we don't already
+                // have, with a fade-in animation. Don't touch existing cards
+                // (the user might be playing one of them).
+                var newItems = items.filter(function(it) {
+                    return !renderedLibraryIds.has(it.id);
+                });
+                // The API returns newest first, so we prepend in the same
+                // order to keep that ordering.
+                for (var i = newItems.length - 1; i >= 0; i--) {
+                    var card = buildLibraryCard(newItems[i]);
+                    card.classList.add('library-card-fadein');
+                    grid.insertBefore(card, grid.firstChild);
+                    renderedLibraryIds.add(newItems[i].id);
+                }
+                container.style.display = 'block';
+                return newItems;
+            })
+            .catch(function(e) { console.warn('library load failed', e); return []; });
+    }
+
+    // Bumped every time the user touches the URL form (typing, picking a
+    // quality, clicking Načíst info). The deferred refresh check below
+    // uses this revision number to avoid wiping the user's in-progress
+    // preparation when an *earlier* preparation's pipeline finally lands.
+    var preparationFormRevision = 0;
+    function markPreparationFormChanged() {
+        preparationFormRevision++;
+    }
+    document.addEventListener('input', markPreparationFormChanged, true);
+    document.addEventListener('change', markPreparationFormChanged, true);
+
+    // Called after a successful preparation. The publish-to-library
+    // pipeline runs in the background after Ready, so we retry the
+    // refresh a few times until the new entry shows up. Once a new card
+    // appears, also clear the URL form so the user can prepare another
+    // video without manual cleanup — but only if the user has not
+    // already started typing a *new* URL in the meantime, otherwise we
+    // would clobber their in-progress preparation.
+    function scheduleLibraryRefresh() {
+        var attempts = 0;
+        var maxAttempts = 8;
+        var delay = 1500;
+        var scheduledRevision = preparationFormRevision;
+        function tick() {
+            attempts++;
+            loadLibrary().then(function(newItems) {
+                if (newItems && newItems.length > 0) {
+                    if (preparationFormRevision === scheduledRevision) {
+                        clearPreparationForm();
+                    }
+                    return;
+                }
+                if (attempts < maxAttempts) {
+                    setTimeout(tick, delay);
+                }
+            });
+        }
+        setTimeout(tick, delay);
+    }
+
+    // Reset the URL form back to its initial state after a video has been
+    // successfully prepared and prepended to the library. The status row
+    // (with the ready-link from the just-finished preparation) is left
+    // intact on purpose — the user can either click that link to download
+    // the file, or scroll down and play the new card. The status is
+    // overwritten the next time the user clicks Připravit.
+    function clearPreparationForm() {
+        urlInput.value = '';
+        previewEl.classList.remove('visible');
+        actionsEl.classList.remove('visible');
+        qualityEl.classList.remove('visible');
+        qualityEl.innerHTML = '';
+        selectedQuality = 'best';
+        btnDownload.disabled = false;
+        // btnDownload stays hidden — the visible ready-link replaces it
+        // until the user starts another preparation by entering a new URL
+        // and clicking Načíst info, which re-shows the button via the
+        // existing fetch flow.
+    }
+
+    function buildLibraryCard(item) {
+        var card = document.createElement('div');
+        card.className = 'library-card';
+        card.dataset.id = item.id;
+
+        var thumb = document.createElement('div');
+        thumb.className = 'library-thumb';
+        thumb.title = 'Přehrát ' + item.title;
+        var img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = item.title;
+        img.src = item.thumbnail_url || '/static/img/logo-stahnout-video.svg';
+        img.onerror = function() { this.src = '/static/img/logo-stahnout-video.svg'; this.style.objectFit = 'contain'; };
+        thumb.appendChild(img);
+        // #366 — the top-right badge shows the human-readable
+        // resolution (e.g. "1080p") from `item.resolution`, not the
+        // raw yt-dlp `format_id` in `item.quality` which is source-
+        // specific garbage ("137" on YouTube, "bytevc1_720p_..." on
+        // TikTok, "mp4" on Seznam). Legacy rows without a backfilled
+        // resolution hide the badge entirely.
+        if (item.resolution) {
+            var quality = document.createElement('div');
+            quality.className = 'library-quality-badge';
+            quality.textContent = item.resolution;
+            thumb.appendChild(quality);
+        }
+        var overlay = document.createElement('div');
+        overlay.className = 'play-overlay';
+        // #358 — same SVG as the audio play button. White-on-dark
+        // circular badge that is always visible on the thumbnail and
+        // brightens on hover, so users immediately understand that
+        // clicking the picture plays the video.
+        overlay.innerHTML = ICON_PLAY;
+        thumb.appendChild(overlay);
+        thumb.addEventListener('click', function() { playLibraryItem(card, item); });
+        card.appendChild(thumb);
+
+        var info = document.createElement('div');
+        info.className = 'library-info';
+        var title = document.createElement('div');
+        title.className = 'library-title';
+        title.textContent = item.title;
+        info.appendChild(title);
+
+        var meta = document.createElement('div');
+        meta.className = 'library-meta';
+        // #357 — duration is shown by the audio mini-player below as
+        // `0:00 / <total>`. Don't repeat it in the meta row.
+        // #366 — no per-card format badge: every library row lives
+        // on Streamtape which always stores H.264 MP4 regardless of
+        // what container the user picked. Showing "MP4" next to every
+        // size would be pure noise; the user sees the actual extension
+        // in the filename when they save via the in-player ⋮ menu.
+        var size = document.createElement('span');
+        size.textContent = item.file_size_mb + ' MB';
+        meta.appendChild(size);
+        info.appendChild(meta);
+
+        // No separate Stáhnout button — see #337. The /stream endpoint
+        // sets `Content-Disposition: inline; filename="<title>.<ext>"` so
+        // the browser's built-in <video> ⋮ menu pre-fills the right
+        // filename when the user picks Save video as…
+
+        card.appendChild(info);
+
+        // #350/#351/#352 — permanent custom audio mini-player.
+        // <video> elements get suspended on screen lock no matter what
+        // Media Session API tricks we play; <audio> elements reliably
+        // keep going. The mini-player is rendered up front so the user
+        // can start podcast-mode playback in one tap, and the scrubber
+        // sits on its own row so it is wide enough to drag with a
+        // finger inside an hour-long recording. preload="none" keeps
+        // the network quiet until the user actually presses play.
+        card.appendChild(buildLibraryAudioMini(card, item));
+        return card;
+    }
+
+    // SVG icons for the audio mini-player. Inline strings (not files)
+    // so a card can swap them with innerHTML without an extra fetch.
+    // fill="currentColor" lets the CSS color rule on .library-audio-iconbtn
+    // recolour the glyph on hover / state change.
+    var ICON_PLAY = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z"/></svg>';
+    var ICON_PAUSE = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
+    // Material-style speaker icons; the path with the wave is the
+    // unmuted state, the one with the diagonal cross-out is muted.
+    var ICON_VOLUME = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+    var ICON_VOLUME_MUTED = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+
+    function buildLibraryAudioMini(card, item) {
+        var mini = document.createElement('div');
+        mini.className = 'library-audio-mini';
+
+        var label = document.createElement('div');
+        label.className = 'library-audio-label';
+        // #356 — 'Pustit jen audio' is the honest description: this
+        // feature plays just the audio track of the saved video. No
+        // icon — earlier attempts (🎧, 👂, custom SVG) all looked
+        // wrong against the muted gray meta row, so we ship the
+        // plain Czech wording on its own.
+        label.textContent = 'Pustit jen audio';
+        mini.appendChild(label);
+
+        var row = document.createElement('div');
+        row.className = 'library-audio-row';
+
+        var playBtn = document.createElement('button');
+        playBtn.type = 'button';
+        playBtn.className = 'library-audio-iconbtn library-audio-play';
+        playBtn.setAttribute('aria-label', 'Spustit zvuk');
+        // aria-pressed reflects the toggle state for assistive tech;
+        // aria-label additionally describes the action.
+        playBtn.setAttribute('aria-pressed', 'false');
+        // SVG icons keep the glyph crisp at any size and recolour with
+        // currentColor — unlike unicode ▶ which some platforms render
+        // as a fixed-colour emoji glyph that ignores CSS color.
+        playBtn.innerHTML = ICON_PLAY;
+        row.appendChild(playBtn);
+
+        var time = document.createElement('span');
+        time.className = 'library-audio-time';
+        // '--:--' is the universal media-player placeholder for an
+        // unknown duration; we leave it there until loadedmetadata
+        // gives us the real number rather than fabricating "0:00".
+        var totalText = item.duration_sec ? formatDuration(item.duration_sec) : '--:--';
+        time.textContent = '0:00 / ' + totalText;
+        row.appendChild(time);
+
+        // #355 — push the volume controls to the right edge so the
+        // layout mirrors a native HTML5 <audio controls> element:
+        // play | time …flex spacer… volume slider + speaker.
+        var spacer = document.createElement('div');
+        spacer.className = 'library-audio-spacer';
+        row.appendChild(spacer);
+
+        // Volume wrapper holds both the slim slider and the mute
+        // button. Hovering anywhere on the wrapper expands the
+        // slider (CSS), so the speaker icon doubles as both the
+        // hover target and a one-click mute toggle.
+        var volWrap = document.createElement('div');
+        volWrap.className = 'library-audio-volume-wrap';
+
+        var volRange = document.createElement('input');
+        volRange.type = 'range';
+        volRange.className = 'library-audio-volume';
+        volRange.min = '0';
+        volRange.max = '1';
+        volRange.step = '0.01';
+        volRange.value = '1';
+        volRange.setAttribute('aria-label', 'Hlasitost');
+        volWrap.appendChild(volRange);
+
+        var muteBtn = document.createElement('button');
+        muteBtn.type = 'button';
+        muteBtn.className = 'library-audio-iconbtn library-audio-mute';
+        muteBtn.setAttribute('aria-label', 'Ztlumit zvuk');
+        muteBtn.setAttribute('aria-pressed', 'false');
+        muteBtn.innerHTML = ICON_VOLUME;
+        volWrap.appendChild(muteBtn);
+
+        row.appendChild(volWrap);
+
+        mini.appendChild(row);
+
+        var range = document.createElement('input');
+        range.type = 'range';
+        range.className = 'library-audio-range';
+        range.min = '0';
+        // If we already know the duration from the library API we use
+        // it; otherwise we *disable* the slider until loadedmetadata
+        // fires so the user can't seek to a meaningless position
+        // before the real max is known. (No magic 100s default.)
+        if (item.duration_sec) {
+            range.max = String(item.duration_sec);
+        } else {
+            range.max = '0';
+            range.disabled = true;
+        }
+        range.step = '0.1';
+        range.value = '0';
+        range.setAttribute('aria-label', 'Posuvník přehrávání');
+        mini.appendChild(range);
+
+        var audio = document.createElement('audio');
+        audio.className = 'library-audio-element';
+        audio.preload = 'none';
+        audio.src = '/api/video/library/' + item.id + '/stream';
+        mini.appendChild(audio);
+
+        var sessionRegistered = false;
+        var seeking = false;
+
+        function updateProgress(seconds, total) {
+            var pct = total > 0 ? Math.min(100, (seconds / total) * 100) : 0;
+            range.style.setProperty('--progress', pct + '%');
+        }
+
+        function fmtTime(seconds) {
+            if (!isFinite(seconds) || seconds < 0) return '0:00';
+            var s = Math.floor(seconds);
+            var h = Math.floor(s / 3600);
+            var m = Math.floor((s % 3600) / 60);
+            var sec = s % 60;
+            if (h > 0) return h + ':' + pad(m) + ':' + pad(sec);
+            return m + ':' + pad(sec);
+        }
+
+        playBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            // If the inline <video> is mounted in this card, fully
+            // tear it down (not just pause) so the browser stops any
+            // pending Range requests and we never have two players
+            // holding /stream connections to the same source.
+            teardownInlineVideo(card);
+            if (audio.paused) {
+                audio.play().catch(function(err) {
+                    console.error('audio play failed', err);
+                });
+            } else {
+                audio.pause();
+            }
+        });
+
+        // #355 — mute toggle + volume slider. We listen on
+        // `volumechange` (instead of toggling icons inside the click
+        // handler) so that programmatic changes — and the OS
+        // lock-screen mute, when wired through Media Session — also
+        // stay in sync with the UI.
+        muteBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            audio.muted = !audio.muted;
+        });
+        // Stop click bubbling on the volume slider so dragging it
+        // doesn't accidentally trigger the play button or card click.
+        volRange.addEventListener('click', function(e) { e.stopPropagation(); });
+        volRange.addEventListener('input', function() {
+            var v = parseFloat(volRange.value);
+            audio.volume = v;
+            // Touching the slider always unmutes — otherwise the user
+            // pulls the slider up and hears nothing because the mute
+            // toggle is still on.
+            if (audio.muted && v > 0) audio.muted = false;
+        });
+        audio.addEventListener('volumechange', function() {
+            if (audio.muted || audio.volume === 0) {
+                muteBtn.innerHTML = ICON_VOLUME_MUTED;
+                muteBtn.setAttribute('aria-label', 'Zrušit ztlumení');
+                muteBtn.setAttribute('aria-pressed', 'true');
+            } else {
+                muteBtn.innerHTML = ICON_VOLUME;
+                muteBtn.setAttribute('aria-label', 'Ztlumit zvuk');
+                muteBtn.setAttribute('aria-pressed', 'false');
+            }
+            // Sync the slider position with the underlying volume so
+            // the dark fill bar correctly reflects the level.
+            var displayVol = audio.muted ? 0 : audio.volume;
+            volRange.value = String(displayVol);
+            volRange.style.setProperty('--vol-progress', (displayVol * 100) + '%');
+        });
+        // Initialise volume slider fill at 100% (default audio.volume).
+        volRange.style.setProperty('--vol-progress', '100%');
+
+        audio.addEventListener('play', function() {
+            playBtn.innerHTML = ICON_PAUSE;
+            playBtn.setAttribute('aria-label', 'Pozastavit zvuk');
+            playBtn.setAttribute('aria-pressed', 'true');
+            if (!sessionRegistered) {
+                registerMediaSession(audio, item);
+                sessionRegistered = true;
+            }
+        });
+
+        audio.addEventListener('pause', function() {
+            playBtn.innerHTML = ICON_PLAY;
+            playBtn.setAttribute('aria-label', 'Spustit zvuk');
+            playBtn.setAttribute('aria-pressed', 'false');
+        });
+
+        audio.addEventListener('ended', function() {
+            playBtn.innerHTML = ICON_PLAY;
+            playBtn.setAttribute('aria-label', 'Spustit zvuk');
+            playBtn.setAttribute('aria-pressed', 'false');
+        });
+
+        audio.addEventListener('loadedmetadata', function() {
+            if (isFinite(audio.duration) && audio.duration > 0) {
+                range.max = String(audio.duration);
+                range.disabled = false;
+                time.textContent = fmtTime(audio.currentTime) + ' / ' + fmtTime(audio.duration);
+            }
+        });
+
+        audio.addEventListener('timeupdate', function() {
+            if (seeking) return;
+            var hasRealDuration = isFinite(audio.duration) && audio.duration > 0;
+            var total = hasRealDuration ? audio.duration : (item.duration_sec || 0);
+            range.value = String(audio.currentTime);
+            updateProgress(audio.currentTime, total);
+            // Show '--:--' until we have a real total — never fabricate
+            // 0:00 if duration is genuinely unknown.
+            var totalLabel = (hasRealDuration || item.duration_sec)
+                ? fmtTime(total)
+                : '--:--';
+            time.textContent = fmtTime(audio.currentTime) + ' / ' + totalLabel;
+        });
+
+        // Drag (input) → live preview, change/pointerup → commit seek.
+        range.addEventListener('input', function() {
+            seeking = true;
+            var total = parseFloat(range.max) || 0;
+            var current = parseFloat(range.value) || 0;
+            updateProgress(current, total);
+            time.textContent = fmtTime(current) + ' / ' + fmtTime(total);
+        });
+        range.addEventListener('change', function() {
+            var current = parseFloat(range.value) || 0;
+            audio.currentTime = current;
+            seeking = false;
+        });
+
+        // Initialize the --progress CSS var so the slider fill is at 0%.
+        updateProgress(0, item.duration_sec || 0);
+
+        return mini;
+    }
+
+    // Fully unmount the inline <video> element from a card and put
+    // the thumbnail back. We use this from the audio mini-player when
+    // the user switches to podcast mode — pausing alone leaves the
+    // <video> mounted with src set, which keeps Range requests open
+    // against /stream.
+    function teardownInlineVideo(card) {
+        var v = card.querySelector('video');
+        if (!v) return;
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+        v.remove();
+        card.classList.remove('playing');
+        var thumb = card.querySelector('.library-thumb');
+        if (thumb) thumb.style.display = '';
+    }
+
+    function playLibraryItem(card, item) {
+        if (card.querySelector('video')) return;
+        // If the permanent audio mini-player is playing in this card,
+        // pause it before swapping in the video so we never double-play
+        // the same source. The mini-player stays in the DOM.
+        var existingAudio = card.querySelector('audio.library-audio-element');
+        if (existingAudio && !existingAudio.paused) existingAudio.pause();
+        // Inline player streams via /stream proxy — Streamtape's direct
+        // CDN URLs are session/IP-bound to whoever called dlticket so we
+        // can't hand them to the browser. The proxy resolves the URL
+        // server-side, fetches Streamtape, and streams through to us
+        // (forwarding Range so seeking still works).
+        var existingThumb = card.querySelector('.library-thumb');
+        existingThumb.style.display = 'none';
+        var v = document.createElement('video');
+        v.controls = true;
+        v.autoplay = true;
+        // #343 — playsinline + webkit-playsinline let mobile Safari /
+        // Android Chrome keep playing audio when the screen is unlocked
+        // (otherwise iOS pulls the video into a fullscreen overlay).
+        // For *background* playback while the screen is locked the user
+        // should use the audio mini-player below the meta row, which
+        // streams the same /stream URL as <audio> — see #350/#351/#352.
+        v.setAttribute('playsinline', '');
+        v.setAttribute('webkit-playsinline', '');
+        v.preload = 'metadata';
+        v.src = '/api/video/library/' + item.id + '/stream';
+        card.classList.add('playing');
+        card.insertBefore(v, card.firstChild);
+
+        // #343 — Media Session API: register title + thumbnail so the OS
+        // lock-screen / notification shade shows the right metadata and
+        // the play/pause/seek hardware keys forward to this video.
+        registerMediaSession(v, item);
+    }
+
+    function registerMediaSession(videoEl, item) {
+        if (!('mediaSession' in navigator)) return;
+        try {
+            var artwork = [];
+            if (item.thumbnail_url) {
+                artwork.push({ src: item.thumbnail_url, sizes: '512x512', type: 'image/jpeg' });
+            }
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: item.title || 'Video',
+                artist: 'ceskarepublika.wiki',
+                artwork: artwork,
+            });
+            navigator.mediaSession.setActionHandler('play', function() { videoEl.play(); });
+            navigator.mediaSession.setActionHandler('pause', function() { videoEl.pause(); });
+            navigator.mediaSession.setActionHandler('seekbackward', function(e) {
+                videoEl.currentTime = Math.max(0, videoEl.currentTime - (e.seekOffset || 10));
+            });
+            navigator.mediaSession.setActionHandler('seekforward', function(e) {
+                videoEl.currentTime = Math.min(
+                    videoEl.duration || Infinity,
+                    videoEl.currentTime + (e.seekOffset || 10)
+                );
+            });
+            navigator.mediaSession.setActionHandler('seekto', function(e) {
+                if (e.fastSeek && 'fastSeek' in videoEl) {
+                    videoEl.fastSeek(e.seekTime);
+                } else {
+                    videoEl.currentTime = e.seekTime;
+                }
+            });
+            // Keep the OS playback state in sync.
+            videoEl.addEventListener('play', function() {
+                navigator.mediaSession.playbackState = 'playing';
+            });
+            videoEl.addEventListener('pause', function() {
+                navigator.mediaSession.playbackState = 'paused';
+            });
+        } catch (e) {
+            // Older browsers / unsupported actions — never break playback.
+            console.warn('mediaSession setup failed', e);
+        }
+    }
+
+    loadLibrary();
+})();
+</script>
+{% endblock %}

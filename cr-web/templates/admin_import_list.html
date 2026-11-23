@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}Auto-import — admin{% endblock %}
+{% block meta_description %}Přehled běhů SK Torrent scanneru.{% endblock %}
+
+{% block og_title %}Auto-import — admin{% endblock %}
+{% block og_description %}Přehled běhů SK Torrent scanneru.{% endblock %}
+
+{# noindex is enforced via X-Robots-Tag response header from the handler;
+   the meta tag duplicates with base.html's `index, follow` and is ambiguous. #}
+
+{% block header_left %}
+<div class="logo-group">
+    <h1>Auto-import — běhy</h1>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="admin-import-page">
+    <nav class="breadcrumb">
+        <a href="/" title="Domů">Česká republika</a>
+        <span>›</span> <a href="/admin/" title="Admin rozcestník">Admin</a>
+        <span>›</span> <span>Auto-import</span>
+    </nav>
+
+    <p class="quick-nav">
+        <a href="/admin/import/summary" title="Všechno co auto-import kdy našel — přidané, doplněné, přeskočené i selhané, s důvody">📊 Souhrnný přehled (napříč všemi běhy) →</a>
+    </p>
+
+    <h2>Posledních 30 běhů SK Torrent scanneru</h2>
+
+    <form method="post" action="/admin/import/run" class="run-now-form">
+        <label for="max_new" title="Bezpečný strop pro testování">Max nových:</label>
+        <input type="number" id="max_new" name="max_new" value="5" min="1" max="100"
+               title="Maximum nových videí ke zpracování (default 5, server clampuje 1–100)">
+        <button type="submit" title="Spustit scanner ručně teď" class="btn-run">▶ Spustit teď</button>
+        <span class="hint" title="Vyžaduje ADMIN_IMPORT_RUN_ENABLED=1 v env. Scanner běží asynchronně, výsledek se objeví v seznamu během několika sekund.">Vyžaduje ADMIN_IMPORT_RUN_ENABLED=1; běží asynchronně.</span>
+    </form>
+
+    {% if runs.is_empty() %}
+    <p class="empty-state">Zatím žádný běh — scanner nebyl spuštěn.</p>
+    {% else %}
+    <table class="runs-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Začátek</th>
+                <th>Trvání</th>
+                <th>Stav</th>
+                <th>Trigger</th>
+                <th>Sken</th>
+                <th>Filmy +</th>
+                <th>Seriály +</th>
+                <th>Epizody +</th>
+                <th>TV show +</th>
+                <th>TV epizoda +</th>
+                <th>Doplněno</th>
+                <th>Selhalo</th>
+                <th>Přeskočeno</th>
+                <th title="prehraj.to: navázáno / hledáno (rows)">prehraj.to</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in runs %}
+            <tr class="{{ r.status_class() }}">
+                <td><a href="/admin/import/{{ r.id }}" title="Detail běhu {{ r.id }}">#{{ r.id }}</a></td>
+                <td>{{ r.started_at_str() }}</td>
+                <td>{{ r.duration_sec() }}s</td>
+                <td><span class="badge badge-{{ r.status }}" title="{{ r.status }}">{{ r.status }}</span></td>
+                <td>{{ r.trigger }}</td>
+                <td>{{ r.scanned_videos }} videí ({{ r.scanned_pages }} stránek)</td>
+                <td>{{ r.added_films }}</td>
+                <td>{{ r.added_series }}</td>
+                <td>{{ r.added_episodes }}</td>
+                <td>{{ r.added_tv_shows }}</td>
+                <td>{{ r.added_tv_episodes }}</td>
+                <td>{{ r.updated_films + r.updated_episodes }}</td>
+                <td class="{% if r.failed_count > 0 %}error-cell{% endif %}">{{ r.failed_count }}</td>
+                <td>{{ r.skipped_count }}</td>
+                <td title="filmů s nalezeným prehraj.to / pokusů (+rows přidaných řádků)">
+                    {% if r.prehrajto_attempted > 0 %}
+                        <strong>{{ r.prehrajto_matched }}</strong>/{{ r.prehrajto_attempted }}
+                        <span class="prh-rows">+{{ r.prehrajto_rows_written }}</span>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</main>
+
+<style>
+.admin-import-page { max-width: 1280px; margin: 0 auto; padding: 1rem; }
+.admin-import-page h2 { font-size: 1.4rem; margin: 1rem 0 1.2rem; }
+.runs-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.runs-table th, .runs-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid #eee; text-align: left; }
+.runs-table th { background: #f8fafc; font-weight: 600; color: #555; }
+.runs-table tbody tr:hover { background: #f9fafb; }
+.runs-table a { color: #11457E; text-decoration: none; font-weight: 600; }
+.runs-table a:hover { text-decoration: underline; }
+.error-cell { color: #b91c1c; font-weight: 600; }
+.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+.badge-ok { background: #d1fae5; color: #065f46; }
+.badge-error { background: #fee2e2; color: #991b1b; }
+.badge-partial { background: #fef3c7; color: #92400e; }
+.badge-running { background: #dbeafe; color: #1e40af; }
+.empty-state { color: #888; padding: 2rem; text-align: center; background: #fafafa; border-radius: 8px; }
+.breadcrumb { font-size: 0.85rem; color: #888; margin-bottom: 1.2rem; }
+.breadcrumb a { color: #11457E; text-decoration: none; }
+.quick-nav { margin: 0 0 1rem; }
+.quick-nav a { color: #11457E; text-decoration: none; font-weight: 600; padding: 0.5rem 0.8rem; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; display: inline-block; transition: background 0.15s; }
+.quick-nav a:hover { background: #dbeafe; }
+.run-now-form { background: #f0f9ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 1.2rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.run-now-form label { font-weight: 600; color: #1e40af; }
+.run-now-form input[type="number"] { width: 60px; padding: 0.3rem 0.5rem; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.9rem; }
+.run-now-form .btn-run { background: #11457E; color: white; border: none; padding: 0.4rem 1rem; border-radius: 4px; font-size: 0.9rem; font-weight: 600; cursor: pointer; }
+.run-now-form .btn-run:hover { background: #0d3a6e; }
+.run-now-form .hint { color: #64748b; font-size: 0.82rem; }
+.runs-table .prh-rows { font-size: 0.72rem; color: #6b21a8; font-weight: 600; }
+</style>
+{% endblock %}

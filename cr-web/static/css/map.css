@@ -1,0 +1,85 @@
+/* --- MAP STYLES --- */
+
+/* SVG inline maps */
+.map-container-svg {
+    position: relative;
+    width: 100%;
+    height: 100%;
+}
+
+#map-cr {
+    width: 100%;
+    height: 100%;
+}
+
+#map-region {
+    width: 100%;
+    height: auto;
+}
+
+/* Homepage region paths */
+.kraj {
+    fill: #d4d4d4;
+    stroke: #888;
+    stroke-width: 1.2;
+    cursor: pointer;
+    transition: fill 0.2s, stroke-width 0.2s;
+}
+
+.kraj:hover,
+.kraj.active {
+    fill: var(--color-link, #11457E);
+    stroke-width: 1.8;
+}
+
+/* Region page ORP paths */
+.orp {
+    fill: #d4d4d4;
+    stroke: #888;
+    stroke-width: 1;
+    cursor: pointer;
+    transition: fill 0.2s, stroke-width 0.2s;
+}
+
+.orp:hover,
+.orp.active {
+    fill: var(--color-link, #11457E);
+    stroke-width: 1.5;
+}
+
+/* ORP city dot markers */
+.orp-dot {
+    fill: var(--color-gold, #C5A059);
+    stroke: #333;
+    stroke-width: 0.5;
+    pointer-events: none;
+}
+
+/* ORP city name labels */
+.orp-label {
+    font-size: 12px;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    fill: #333;
+    text-anchor: middle;
+    pointer-events: none;
+    transition: fill 0.2s;
+}
+
+.orp-label.active {
+    fill: var(--color-gold, #C5A059);
+}
+
+/* List item highlighted when map region/ORP is hovered */
+.nav-link.map-hover {
+    color: var(--color-link);
+}
+
+.nav-link.map-hover:before {
+    color: var(--color-link);
+}
+
+.nav-link.map-hover span {
+    text-decoration: underline;
+    text-decoration-color: var(--color-link);
+}

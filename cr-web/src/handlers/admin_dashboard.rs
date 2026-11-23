@@ -1,0 +1,334 @@
+//! Admin landing page `/admin/` — rozcestník pro všechny administrační sekce.
+//!
+//! Zobrazuje dlaždice:
+//!   - Auto-import (SK Torrent → films/series/tv_shows)
+//!   - Zálohy DB (pg_dump → Cloudflare R2)
+//!   - IMDb hodnocení (datasets.imdbws.com TSV → films/series/tv_shows)
+//!   - TMDB hodnocení (/movie/changes + /tv/changes → films/series/tv_shows)
+//!
+//! Každá dlaždice ukazuje stav poslední akce, aby admin ráno věděl, jestli
+//! noční pipeline proběhla v pořádku.
+//!
+//! Routes:
+//!   GET /admin/   — dashboard
+//!   GET /admin    — dashboard (bez lomítka)
+
+use askama::Template;
+use axum::extract::State;
+use axum::response::{Html, IntoResponse, Response};
+
+use crate::error::WebResult;
+use crate::state::AppState;
+
+/// Snapshot jednoho posledního běhu — společný tvar pro import i zálohy.
+struct LastRunTile {
+    /// 'ok', 'error', 'partial', 'running', 'none'
+    status: &'static str,
+    /// Lidsky formátovaná zpráva ("Před 4 hodinami — ok, 47 filmů přidáno").
+    message: String,
+}
+
+impl LastRunTile {
+    fn css_class(&self) -> &'static str {
+        match self.status {
+            "ok" => "tile-ok",
+            "partial" => "tile-warn",
+            "error" => "tile-error",
+            "running" => "tile-running",
+            _ => "tile-unknown",
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "admin_dashboard.html")]
+struct AdminDashboardTemplate {
+    img: String,
+    import_tile: LastRunTile,
+    backup_tile: LastRunTile,
+    cache_tile: LastRunTile,
+    imdb_tile: LastRunTile,
+    tmdb_tile: LastRunTile,
+}
+
+fn noindex(html: String) -> Response {
+    let mut resp = Html(html).into_response();
+    resp.headers_mut().insert(
+        "X-Robots-Tag",
+        axum::http::HeaderValue::from_static("noindex, nofollow"),
+    );
+    resp
+}
+
+fn hours_ago(t: chrono::DateTime<chrono::Utc>) -> i64 {
+    (chrono::Utc::now() - t).num_hours().max(0)
+}
+
+async fn fetch_import_tile(state: &AppState) -> LastRunTile {
+    #[derive(sqlx::FromRow)]
+    struct LastImport {
+        started_at: chrono::DateTime<chrono::Utc>,
+        status: String,
+        added_films: i32,
+        added_series: i32,
+        added_episodes: i32,
+        failed_count: i32,
+    }
+
+    // Rozlišuj mezi "prázdná tabulka" (= Ok(None)) a "query selhala" (= Err).
+    // Při chybě ukáž červenou dlaždici, ne klidné „zatím žádný běh" — incident
+    // s DB bychom jinak na dashboardu přehlédli.
+    let row = match sqlx::query_as::<_, LastImport>(
+        "SELECT started_at, status, added_films, added_series, added_episodes, failed_count \
+         FROM import_runs ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Detail do journaldu, obecná hláška do HTML — /admin/ je zatím
+            // bez auth a je na veřejném vhostu, neleakovat DB hostname /
+            // SQLx driver detaily návštěvníkům.
+            tracing::error!("admin dashboard: import_runs query failed: {e}");
+            return LastRunTile {
+                status: "error",
+                message: "Chyba DB (import_runs) — viz journald.".to_string(),
+            };
+        }
+    };
+
+    match row {
+        None => LastRunTile {
+            status: "none",
+            message: "Zatím žádný běh — scanner nebyl spuštěn.".to_string(),
+        },
+        Some(r) => {
+            let h = hours_ago(r.started_at);
+            let added = r.added_films + r.added_series + r.added_episodes;
+            let status: &'static str = match r.status.as_str() {
+                "ok" => "ok",
+                "partial" => "partial",
+                "error" => "error",
+                "running" => "running",
+                _ => "none",
+            };
+            let summary = if r.status == "running" {
+                "právě běží".to_string()
+            } else if r.failed_count > 0 {
+                format!("+{added} / ⚠ {} selhalo", r.failed_count)
+            } else {
+                format!("+{added} položek")
+            };
+            LastRunTile {
+                status,
+                message: format!("Před {h}h — {} ({summary})", r.status),
+            }
+        }
+    }
+}
+
+async fn fetch_backup_tile(state: &AppState) -> LastRunTile {
+    #[derive(sqlx::FromRow)]
+    struct LastBackup {
+        started_at: chrono::DateTime<chrono::Utc>,
+        status: String,
+        size_bytes: Option<i64>,
+    }
+
+    // Stejně jako u importu — "query selhala" ≠ "prázdná tabulka".
+    let row = match sqlx::query_as::<_, LastBackup>(
+        "SELECT started_at, status, size_bytes \
+         FROM backup_runs ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Stejně jako u import_runs — obecná hláška, detaily do journaldu.
+            tracing::error!("admin dashboard: backup_runs query failed: {e}");
+            return LastRunTile {
+                status: "error",
+                message: "Chyba DB (backup_runs) — viz journald.".to_string(),
+            };
+        }
+    };
+
+    match row {
+        None => LastRunTile {
+            status: "none",
+            message: "Zatím žádná záloha — pipeline ještě neběžela.".to_string(),
+        },
+        Some(r) => {
+            let h = hours_ago(r.started_at);
+            let status: &'static str = match r.status.as_str() {
+                "ok" => "ok",
+                "error" => "error",
+                "running" => "running",
+                _ => "none",
+            };
+            let size = match r.size_bytes {
+                Some(b) if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+                Some(b) => format!("{} B", b),
+                None => "—".to_string(),
+            };
+            LastRunTile {
+                status,
+                message: format!("Před {h}h — {} ({size})", r.status),
+            }
+        }
+    }
+}
+
+fn cache_tile(state: &AppState) -> LastRunTile {
+    // Dashboard tile reflects config state — tracking actual purge history
+    // would require a new table; for now admins just see whether the feature
+    // is wired up.
+    match &state.config.cf_cache_purge {
+        Some(_) => LastRunTile {
+            status: "ok",
+            message: "Nakonfigurováno — klikni pro promazání.".to_string(),
+        },
+        None => LastRunTile {
+            status: "none",
+            message: "Chybí CF_CACHE_PURGE_TOKEN / CF_ZONE_ID.".to_string(),
+        },
+    }
+}
+
+/// Read the latest `rating_sync_runs` row for the given kind ('imdb' / 'tmdb')
+/// and render it as a dashboard tile. Same error-vs-empty distinction as
+/// the other tiles — DB error stays loud, empty table is calm.
+async fn fetch_rating_tile(state: &AppState, kind: &'static str) -> LastRunTile {
+    #[derive(sqlx::FromRow)]
+    struct LastRatingSync {
+        started_at: chrono::DateTime<chrono::Utc>,
+        status: String,
+        films_refreshed: i32,
+        series_refreshed: i32,
+        tv_shows_refreshed: i32,
+        failed_count: i32,
+        error_message: Option<String>,
+    }
+
+    let row = match sqlx::query_as::<_, LastRatingSync>(
+        "SELECT started_at, status, films_refreshed, series_refreshed, \
+         tv_shows_refreshed, failed_count, error_message \
+         FROM rating_sync_runs WHERE kind = $1 \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(kind)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Special-case "table does not exist" (Postgres SQLSTATE 42P01).
+            // The Python sync scripts tolerate migration 070 not yet being
+            // applied; if the dashboard treated that as a red incident the
+            // first deploy of this feature on an older instance would scream
+            // false alarms in journald and on /admin/. Real DB errors
+            // (auth, connection, schema-mismatch in *other* columns) still
+            // surface as `error` and get logged loudly.
+            if let sqlx::Error::Database(db_err) = &e
+                && db_err.code().as_deref() == Some("42P01")
+            {
+                return LastRunTile {
+                    status: "none",
+                    message: "Migrace 070 ještě není aplikována.".to_string(),
+                };
+            }
+            tracing::error!("admin dashboard: rating_sync_runs query failed for kind={kind}: {e}");
+            return LastRunTile {
+                status: "error",
+                message: "Chyba DB (rating_sync_runs) — viz journald.".to_string(),
+            };
+        }
+    };
+
+    match row {
+        None => LastRunTile {
+            status: "none",
+            message: "Zatím žádný běh — sync nikdy neproběhl.".to_string(),
+        },
+        Some(r) => {
+            let h = hours_ago(r.started_at);
+            let status: &'static str = match r.status.as_str() {
+                "ok" => "ok",
+                "partial" => "partial",
+                "error" => "error",
+                "running" => "running",
+                _ => "none",
+            };
+            let total = r.films_refreshed + r.series_refreshed + r.tv_shows_refreshed;
+            let summary = if r.status == "running" {
+                "právě běží".to_string()
+            } else if r.status == "error" {
+                // error_message is trimmed by the Python scripts to 500
+                // chars; cap further here so a multi-line traceback
+                // doesn't blow up the tile. The full text is still in
+                // journald — link the operator there mentally via the
+                // "viz journald" trailer.
+                let detail = r
+                    .error_message
+                    .as_deref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        let max = 120;
+                        if s.chars().count() > max {
+                            let truncated: String = s.chars().take(max).collect();
+                            format!("{truncated}…")
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "bez detailu".to_string());
+                format!("{detail} — viz journald")
+            } else if total == 0 && r.failed_count == 0 && r.status == "ok" {
+                // IMDb sync returns a status=ok / counts=0 row when the
+                // upstream TSV's Last-Modified is unchanged from the
+                // previous run — nothing to refresh, but the pipeline DID
+                // execute (and we want the tile to reflect that, not look
+                // like a missing run). "TMDB /changes empty" hits the same
+                // branch; both meanings are accurate here.
+                "beze změny zdroje".to_string()
+            } else {
+                let base = format!(
+                    "{total} ↻ ({}f / {}s / {}tv)",
+                    r.films_refreshed, r.series_refreshed, r.tv_shows_refreshed,
+                );
+                if r.failed_count > 0 {
+                    format!("{base} / ⚠ {} selhalo", r.failed_count)
+                } else {
+                    base
+                }
+            };
+            LastRunTile {
+                status,
+                message: format!("Před {h}h — {} ({summary})", r.status),
+            }
+        }
+    }
+}
+
+/// GET /admin/ — landing page with per-section status tiles.
+pub async fn admin_dashboard(State(state): State<AppState>) -> WebResult<Response> {
+    let (import_tile, backup_tile, imdb_tile, tmdb_tile) = tokio::join!(
+        fetch_import_tile(&state),
+        fetch_backup_tile(&state),
+        fetch_rating_tile(&state, "imdb"),
+        fetch_rating_tile(&state, "tmdb"),
+    );
+
+    let tmpl = AdminDashboardTemplate {
+        img: state.image_base_url.clone(),
+        import_tile,
+        backup_tile,
+        cache_tile: cache_tile(&state),
+        imdb_tile,
+        tmdb_tile,
+    };
+    Ok(noindex(tmpl.render()?))
+}

@@ -1,0 +1,417 @@
+{% extends "base.html" %}
+
+{% block title %}TV pořady online{% endblock %}
+
+{% block meta_description %}TV pořady online zdarma — {{ total_count }} pořadů ke zhlédnutí na ceskarepublika.wiki.{% endblock %}
+
+{% block og_title %}TV pořady — ceskarepublika.wiki{% endblock %}
+{% block og_description %}TV pořady online zdarma — {{ total_count }} pořadů ke zhlédnutí.{% endblock %}
+{% block og_image %}http://localhost:3000/static/img/og-filmy-a-serialy-v6.png{% endblock %}
+{% block og_type %}article{% endblock %}
+
+{% block leaflet %}{% endblock %}
+
+{% block head %}
+<link rel="icon" type="image/svg+xml" href="/static/img/logo-filmy-a-serialy.svg?v=6">
+<meta property="og:image:secure_url" content="http://localhost:3000/static/img/og-filmy-a-serialy-v6.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="TV pořady — ceskarepublika.wiki">
+<meta property="og:url" content="http://localhost:3000/tv-porady/">
+{% endblock %}
+
+{% block header_left %}
+<div class="logo-group" style="display:flex;align-items:center;gap:0.5rem;">
+    <a href="/tv-porady/" style="display:flex;align-items:center;text-decoration:none;" alt="TV pořady" title="TV pořady">
+        <img src="/static/img/logo-filmy-a-serialy.svg?v=6" alt="Logo TV pořady" title="TV pořady" class="header-emblem">
+    </a>
+    <h1>TV pořady</h1>
+</div>
+{% endblock %}
+
+{% block header_search %}
+<div class="search-container" id="header-search-box">
+    <input type="text" id="tv-search" class="search-input" placeholder="Hledat TV pořad..." autocomplete="off" {% match search_query %}{% when Some with (q) %}value="{{ q }}"{% when None %}{% endmatch %}>
+    <button class="search-btn" onclick="doSearch()">Hledat</button>
+    <div id="search-results" class="search-dropdown"></div>
+</div>
+{% endblock %}
+
+{% block header_right %}<div class="context-emblem"></div>{% endblock %}
+
+{% block content %}
+<main class="series-page">
+<nav class="breadcrumb">
+    <a href="/" alt="Česká republika" title="Česká republika">Česká republika</a>
+    <span>›</span> <a href="/tv-porady/" alt="TV pořady" title="TV pořady">TV pořady</a>
+</nav>
+
+<div class="films-header">
+    {% match search_query %}
+    {% when Some with (q) %}
+    <h2>Výsledky hledání pro „{{ q }}" <span class="count">({{ total_count }})</span></h2>
+    {% when None %}
+        {% if episodes.is_empty() %}
+        <h1>TV pořady <span class="count">({{ total_count }})</span></h1>
+        {% else %}
+        <h2>Nejnovější epizody z {{ total_count }} TV pořadů</h2>
+        {% endif %}
+    {% endmatch %}
+    <div class="films-toolbar">
+        <label class="toolbar-group">
+            <span class="toolbar-label">Řazení:</span>
+            <select id="sort-field" onchange="applySortField(this.value)" aria-label="Podle čeho řadit TV pořady" class="sort-select-field">
+                <option value="pridano">Podle přidání</option>
+                <option value="rok">Podle roku vydání</option>
+                <option value="imdb">Podle hodnocení IMDb</option>
+                <option value="tmdb">Podle hodnocení TMDB</option>
+                <option value="csfd">Podle hodnocení ČSFD</option>
+                <option value="nazev">Podle názvu</option>
+            </select>
+            <select id="sort-dir" onchange="applySortDir(this.value)" aria-label="Směr řazení" class="sort-select-dir">
+                <option value="desc">↓ Sestupně</option>
+                <option value="asc">↑ Vzestupně</option>
+            </select>
+        </label>
+        <button class="view-btn view-toggle" id="btn-view-toggle" onclick="toggleView()" aria-label="Přepnout zobrazení mřížka / seznam">
+            <svg class="view-icon-grid" width="18" height="18" viewBox="0 0 18 18"><rect x="1" y="2" width="16" height="3" rx="1" fill="currentColor"/><rect x="1" y="7.5" width="16" height="3" rx="1" fill="currentColor"/><rect x="1" y="13" width="16" height="3" rx="1" fill="currentColor"/></svg>
+            <svg class="view-icon-list" width="18" height="18" viewBox="0 0 18 18" style="display:none;"><rect x="1" y="1" width="7" height="7" rx="1" fill="currentColor"/><rect x="10" y="1" width="7" height="7" rx="1" fill="currentColor"/><rect x="1" y="10" width="7" height="7" rx="1" fill="currentColor"/><rect x="10" y="10" width="7" height="7" rx="1" fill="currentColor"/></svg>
+        </button>
+    </div>
+</div>
+
+{# Main grid: episodes (default) or shows (search mode) #}
+{% if !episodes.is_empty() %}
+<div class="films-grid" id="films-container">
+    {% for ep in episodes %}
+    <a href="/tv-porady/{{ ep.tv_show_slug }}/{% match ep.episode_slug %}{% when Some with (s) %}{{ s }}{% when None %}{{ ep.season }}x{{ ep.episode }}{% endmatch %}/" class="film-card" title="{{ ep.tv_show_title }} — S{{ ep.season }}E{{ ep.episode }}">
+        <div class="film-poster">
+            <img src="/tv-porady/{{ ep.tv_show_slug }}.webp" alt="{{ ep.tv_show_title }}" title="{{ ep.tv_show_title }}" loading="lazy" width="200" height="300">
+            <div class="rating-badges">
+                {# Card view: show all available ratings stacked (#593) #}
+                {% match ep.tv_show_tmdb_rating %}
+                {% when Some with (r) %}<span class="rating-badge tmdb" title="TMDB hodnocení" aria-label="TMDB hodnocení {{ "{:.1}"|format(r) }}">{{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                {% match ep.tv_show_imdb_rating %}
+                {% when Some with (r) %}<span class="rating-badge imdb" title="IMDb hodnocení" aria-label="IMDb hodnocení {{ "{:.1}"|format(r) }}">{{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                {% match ep.tv_show_csfd_rating %}
+                {% when Some with (r) %}{% if ep.tv_show_csfd_rating_count.unwrap_or(0) >= 5 %}<span class="rating-badge csfd" title="ČSFD hodnocení" aria-label="ČSFD hodnocení {{ r }}%">{{ r }}%</span>{% endif %}{% when None %}{% endmatch %}
+            </div>
+            {% if ep.has_subtitles.unwrap_or(false) %}
+            <span class="cc-badge" title="České titulky">CC</span>
+            {% endif %}
+        </div>
+        <div class="film-body">
+            <div class="film-info">
+                <span class="film-title">{{ ep.tv_show_title }}</span>
+                {% match ep.tv_show_original_title %}{% when Some with (ot) %}{% if ot.as_str() != ep.tv_show_title.as_str() %}<span class="film-original">{{ ot }}</span>{% endif %}{% when None %}{% endmatch %}
+                <span class="film-episode-label">{% match ep.episode_name %}{% when Some with (n) %}{% if !n.is_empty() && !n.starts_with(char::is_numeric) %}{{ n }} {% endif %}{% when None %}{% endmatch %}S{{ "{:02}"|format(ep.season) }}E{{ "{:02}"|format(ep.episode) }}</span>
+            </div>
+            <div class="film-list-extra">
+                <div class="film-ratings">
+                    {% match ep.tv_show_tmdb_rating %}{% when Some with (r) %}<span class="badge tmdb">TMDB {{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                    {% match ep.tv_show_imdb_rating %}{% when Some with (r) %}<span class="badge imdb">IMDb {{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                    {% match ep.tv_show_csfd_rating %}{% when Some with (r) %}{% if ep.tv_show_csfd_rating_count.unwrap_or(0) >= 5 %}<span class="badge csfd">ČSFD {{ r }}%</span>{% endif %}{% when None %}{% endmatch %}
+                    {% match ep.tv_show_first_air_year %}{% when Some with (y) %}<span class="badge year">{{ y }}</span>{% when None %}{% endmatch %}
+                </div>
+                {% match ep.tv_show_description %}{% when Some with (d) %}<p class="film-desc">{{ d }}</p>{% when None %}{% endmatch %}
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="films-grid" id="films-container">
+    {% for s in shows %}
+    <a href="/tv-porady/{{ s.slug }}/" class="film-card" alt="{{ s.title }}" title="{{ s.title }}">
+        <div class="film-poster">
+            <img src="/tv-porady/{{ s.slug }}.webp" alt="{{ s.title }}" title="{{ s.title }}" loading="lazy" width="200" height="300">
+            <div class="rating-badges">
+                {% match s.tmdb_rating %}{% when Some with (r) %}<span class="rating-badge tmdb" title="TMDB hodnocení" aria-label="TMDB hodnocení {{ "{:.1}"|format(r) }}">{{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                {% match s.imdb_rating %}{% when Some with (r) %}<span class="rating-badge imdb" title="IMDb hodnocení" aria-label="IMDb hodnocení {{ "{:.1}"|format(r) }}">{{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                {% match s.csfd_rating %}{% when Some with (r) %}{% if s.csfd_rating_count.unwrap_or(0) >= 5 %}<span class="rating-badge csfd" title="ČSFD hodnocení" aria-label="ČSFD hodnocení {{ r }}%">{{ r }}%</span>{% endif %}{% when None %}{% endmatch %}
+            </div>
+        </div>
+        <div class="film-body">
+            <div class="film-info">
+                <span class="film-title">{{ s.title }}</span>
+                {% match s.original_title %}{% when Some with (ot) %}{% if ot.as_str() != s.title.as_str() %}<span class="film-original">{{ ot }}</span>{% endif %}{% when None %}{% endmatch %}
+                {% match s.first_air_year %}{% when Some with (y) %}<span class="film-year">{{ y }}</span>{% when None %}{% endmatch %}
+            </div>
+            <div class="film-list-extra">
+                <div class="film-ratings">
+                    {% match s.tmdb_rating %}{% when Some with (r) %}<span class="badge tmdb">TMDB {{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                    {% match s.imdb_rating %}{% when Some with (r) %}<span class="badge imdb">IMDb {{ "{:.1}"|format(r) }}</span>{% when None %}{% endmatch %}
+                    {% match s.csfd_rating %}{% when Some with (r) %}{% if s.csfd_rating_count.unwrap_or(0) >= 5 %}<span class="badge csfd">ČSFD {{ r }}%</span>{% endif %}{% when None %}{% endmatch %}
+                </div>
+                {% match s.description %}{% when Some with (d) %}<p class="film-desc">{{ d }}</p>{% when None %}{% endmatch %}
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if total_pages > 1 %}
+<nav class="pagination">
+    {% if page > 1 %}
+    <a href="?strana={{ page - 1 }}{{ query_string }}" class="page-link" alt="Předchozí stránka" title="Předchozí stránka">&laquo;</a>
+    {% endif %}
+    {% for p in 1..=total_pages %}
+    {% if p == page %}
+    <span class="page-link current">{{ p }}</span>
+    {% else %}
+    {% if p <= 2 || p > total_pages - 2 || (p >= page - 2 && p <= page + 2) %}
+    <a href="?strana={{ p }}{{ query_string }}" class="page-link" alt="Strana {{ p }}" title="Strana {{ p }}">{{ p }}</a>
+    {% else %}
+    {% if p == 3 && page > 5 %}<span class="page-dots">…</span>{% endif %}
+    {% if p == total_pages - 2 && page < total_pages - 4 %}<span class="page-dots">…</span>{% endif %}
+    {% endif %}
+    {% endif %}
+    {% endfor %}
+    {% if page < total_pages %}
+    <a href="?strana={{ page + 1 }}{{ query_string }}" class="page-link" alt="Další stránka" title="Další stránka">&raquo;</a>
+    {% endif %}
+</nav>
+{% endif %}
+</main>
+
+<style>
+.series-page { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+.breadcrumb { font-size: 0.85rem; color: #888; margin: 0.5rem 0 1rem; }
+.breadcrumb a { color: #11457E; text-decoration: none; }
+.films-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.8rem; }
+.films-header h2 { margin: 0; font-size: 1.3rem; }
+.films-header .count { color: #888; font-weight: 400; }
+.films-toolbar { display: flex; align-items: center; gap: 0.4rem; }
+.toolbar-group { display: inline-flex; align-items: center; gap: 0.4rem; }
+.toolbar-label { font-size: 0.82rem; color: #555; font-weight: 500; }
+.sort-select-field, .sort-select-dir { padding: 0.4rem 0.7rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.85rem; cursor: pointer; background: white; }
+.sort-select-field { min-width: 170px; }
+.sort-select-dir { min-width: 110px; }
+.sort-select-field:focus, .sort-select-dir:focus { outline: 1px solid #11457E; }
+.view-btn { background: #f0f0f0; border: none; padding: 0.4rem; border-radius: 6px; cursor: pointer; color: #666; display: flex; align-items: center; transition: background 0.15s; }
+.view-btn:hover { background: #e0e0e0; }
+.view-toggle { background: #f1f5f9; color: #555; border-radius: 6px; padding: 0.4rem 0.7rem; }
+.films-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+.films-grid .film-card { text-decoration: none; color: inherit; display: block; border-radius: 8px; overflow: hidden; background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.1); transition: transform 0.15s, box-shadow 0.15s; }
+.films-grid .film-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.film-poster { aspect-ratio: 2/3; background: #222; position: relative; }
+.film-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.no-poster { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #888; padding: 1rem; text-align: center; }
+.rating-badges { position: absolute; top: 0.4rem; left: 0.4rem; display: flex; gap: 0.25rem; }
+.rating-badge { padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+.rating-badge.tmdb { background: #01b4e4; color: #fff; }
+.rating-badge.imdb { background: #f5c518; color: #000; }
+.rating-badge.csfd { background: #b01020; color: #fff; }
+.cc-badge { position: absolute; bottom: 0.4rem; right: 0.4rem; background: #4ade80; color: #003c1c; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+.film-body { padding: 0.6rem; }
+.film-info { display: flex; flex-direction: column; }
+.film-title { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.film-original { font-size: 0.8rem; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.film-year { font-size: 0.8rem; color: #555; }
+.film-episode-label { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; background: #f1f5f9; color: #11457E; font-size: 0.78rem; font-weight: 600; margin-top: 0.15rem; align-self: flex-start; transition: background 0.15s, color 0.15s; }
+.film-card:hover .film-episode-label { background: #11457E; color: white; }
+.film-list-extra { display: none; }
+.film-ratings { display: flex; gap: 0.3rem; margin: 0.3rem 0; flex-wrap: wrap; }
+.badge { font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 600; }
+.badge.tmdb { background: #01b4e4; color: #fff; }
+.badge.imdb { background: #f5c518; color: #000; }
+.badge.csfd { background: #b01020; color: #fff; }
+.badge.year { background: #e2e8f0; color: #333; }
+.film-desc { font-size: 0.8rem; color: #555; margin: 0.3rem 0 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.films-grid.list-view { grid-template-columns: 1fr; }
+.films-grid.list-view .film-card { display: grid; grid-template-columns: 120px 1fr; }
+.films-grid.list-view .film-poster { aspect-ratio: 2/3; max-width: 120px; }
+.films-grid.list-view .film-body { padding: 0.8rem 1rem; }
+.films-grid.list-view .film-list-extra { display: block; }
+.pagination { display: flex; justify-content: center; align-items: center; gap: 0.3rem; margin: 2rem 0; flex-wrap: wrap; }
+.page-link { display: inline-flex; align-items: center; justify-content: center; padding: 0.4rem 0.8rem; border-radius: 999px; background: #f1f5f9; color: #11457E; text-decoration: none; font-size: 0.85rem; font-weight: 600; min-width: 2.2rem; transition: background 0.15s, color 0.15s; }
+.page-link:hover { background: #11457E; color: white; }
+.page-link.current { background: #C5A059; color: white; cursor: default; }
+.page-dots { padding: 0.4rem 0.2rem; color: #888; }
+
+/* Search autocomplete dropdown */
+#header-search-box { position: relative; overflow: visible !important; }
+.search-dropdown { display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: white; border: 1px solid #ddd; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.18); z-index: 200; max-height: 420px; overflow-y: auto; }
+.search-dropdown.open { display: block; }
+.search-item { display: flex; align-items: center; gap: 0.7rem; padding: 0.5rem 0.8rem; text-decoration: none; color: inherit; border-bottom: 1px solid #f0f0f0; transition: background 0.15s; }
+.search-item:last-child { border-bottom: none; }
+.search-item:hover { background: #f5f5f5; }
+.search-item img { width: 40px; height: 60px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.search-item .si-placeholder { width: 40px; height: 60px; background: #eee; border-radius: 4px; flex-shrink: 0; }
+.search-item .si-info { flex: 1; min-width: 0; }
+.search-item .si-title { font-weight: 500; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-item .si-meta { font-size: 0.8rem; color: #888; display: flex; gap: 0.25rem; align-items: center; }
+.search-item .si-rating { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.72rem; font-weight: 700; }
+.search-item .si-rating.tmdb { background: #01b4e4; color: #fff; }
+.search-item .si-rating.imdb { background: #f5c518; color: #000; }
+</style>
+
+<script>
+function doSearch() {
+    var q = document.getElementById('tv-search').value.trim();
+    if (q.length >= 2) window.location = '/tv-porady/?q=' + encodeURIComponent(q);
+}
+
+function setView(mode) {
+    var c = document.getElementById('films-container');
+    var iconGrid = document.querySelector('.view-icon-grid');
+    var iconList = document.querySelector('.view-icon-list');
+    if (mode === 'list') {
+        c.classList.add('list-view');
+        if (iconGrid) iconGrid.style.display = 'none';
+        if (iconList) iconList.style.display = '';
+    } else {
+        c.classList.remove('list-view');
+        if (iconGrid) iconGrid.style.display = '';
+        if (iconList) iconList.style.display = 'none';
+    }
+    localStorage.setItem('tvPoradyView', mode);
+}
+function toggleView() {
+    var current = localStorage.getItem('tvPoradyView') || 'grid';
+    setView(current === 'list' ? 'grid' : 'list');
+}
+(function(){ var s = localStorage.getItem('tvPoradyView'); if (s === 'list') setView('list'); })();
+
+/* --- Sort (two separate selects: field + direction) — mirrors films/series --- */
+function applySortField(field) {
+    var u = new URL(window.location);
+    if (field === 'pridano') u.searchParams.delete('razeni');
+    else u.searchParams.set('razeni', field);
+    if (field === 'nazev') u.searchParams.set('smer', 'asc');
+    else u.searchParams.delete('smer');
+    u.searchParams.delete('strana');
+    window.location = u.toString();
+}
+
+function applySortDir(dir) {
+    var u = new URL(window.location);
+    if (dir === 'asc') u.searchParams.set('smer', 'asc');
+    else u.searchParams.delete('smer');
+    u.searchParams.delete('strana');
+    window.location = u.toString();
+}
+
+(function() {
+    var urlParams = new URLSearchParams(window.location.search);
+    var razeni = urlParams.get('razeni') || 'pridano';
+    var defaultDir = razeni === 'nazev' ? 'asc' : 'desc';
+    var smer = urlParams.get('smer') === 'asc' ? 'asc'
+             : urlParams.get('smer') === 'desc' ? 'desc'
+             : defaultDir;
+    var fieldSel = document.getElementById('sort-field');
+    if (fieldSel) fieldSel.value = razeni;
+    var dirSel = document.getElementById('sort-dir');
+    if (dirSel) dirSel.value = smer;
+})();
+
+/* Autocomplete — hits /api/tv-porady/search. Uses DOM APIs + AbortController
+   to avoid XSS from untrusted titles and stale responses overwriting fresh
+   results (both flagged by Copilot on PR #493). */
+(function() {
+    var input = document.getElementById('tv-search');
+    var dd = document.getElementById('search-results');
+    var timer = null;
+    var currentCtrl = null;
+    if (!input || !dd) return;
+
+    function renderResults(results) {
+        dd.textContent = '';
+        if (!results.length) {
+            var empty = document.createElement('div');
+            empty.style.padding = '0.8rem';
+            empty.style.color = '#888';
+            empty.style.textAlign = 'center';
+            empty.textContent = 'Nic nenalezeno';
+            dd.appendChild(empty);
+            return;
+        }
+        results.forEach(function(r) {
+            var item = document.createElement('a');
+            item.href = '/tv-porady/' + r.slug + '/';
+            item.className = 'search-item';
+            item.title = r.title;
+
+            if (r.cover) {
+                var img = document.createElement('img');
+                img.src = '/tv-porady/' + r.slug + '.webp';
+                img.alt = r.title;
+                img.title = r.title;
+                item.appendChild(img);
+            } else {
+                var placeholder = document.createElement('div');
+                placeholder.className = 'si-placeholder';
+                item.appendChild(placeholder);
+            }
+
+            var info = document.createElement('div');
+            info.className = 'si-info';
+            var title = document.createElement('span');
+            title.className = 'si-title';
+            title.textContent = r.title + (r.year ? ' (' + r.year + ')' : '');
+            var meta = document.createElement('span');
+            meta.className = 'si-meta';
+            // Build colored badges (image-form display — no TMDB/IMDb text prefix, color does the talking).
+            // `aria-label` carries the source name so screen readers still get "TMDB hodnocení 6.2" / "IMDb hodnocení 7.0".
+            if (r.tmdb_rating) {
+                var t = document.createElement('span');
+                t.className = 'si-rating tmdb';
+                t.title = 'TMDB hodnocení';
+                t.textContent = r.tmdb_rating.toFixed(1);
+                t.setAttribute('aria-label', 'TMDB hodnocení ' + r.tmdb_rating.toFixed(1));
+                meta.appendChild(t);
+            }
+            if (r.imdb_rating) {
+                var i2 = document.createElement('span');
+                i2.className = 'si-rating imdb';
+                i2.title = 'IMDb hodnocení';
+                i2.textContent = r.imdb_rating.toFixed(1);
+                i2.setAttribute('aria-label', 'IMDb hodnocení ' + r.imdb_rating.toFixed(1));
+                meta.appendChild(i2);
+            }
+            info.appendChild(title);
+            info.appendChild(meta);
+            item.appendChild(info);
+            dd.appendChild(item);
+        });
+    }
+
+    input.addEventListener('input', function() {
+        clearTimeout(timer);
+        var q = this.value.trim();
+        if (q.length < 2) {
+            if (currentCtrl) { currentCtrl.abort(); currentCtrl = null; }
+            dd.classList.remove('open');
+            return;
+        }
+        timer = setTimeout(function() {
+            if (currentCtrl) currentCtrl.abort();
+            currentCtrl = new AbortController();
+            var myCtrl = currentCtrl;
+            fetch('/api/tv-porady/search?q=' + encodeURIComponent(q),
+                  { signal: myCtrl.signal })
+                .then(function(r) { return r.json(); })
+                .then(function(results) {
+                    if (myCtrl !== currentCtrl) return; // stale
+                    renderResults(results);
+                    dd.classList.add('open');
+                })
+                .catch(function(err) {
+                    if (err.name === 'AbortError') return;
+                    dd.classList.remove('open');
+                });
+        }, 200);
+    });
+
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('#header-search-box')) dd.classList.remove('open');
+    });
+
+    input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); doSearch(); }
+    });
+})();
+</script>
+{% endblock %}

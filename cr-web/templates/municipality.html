@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}{{ municipality.name }} | {{ orp.name }} | {{ region.name }}{% endblock %}
+
+{% block header_left %}
+<div class="logo-group">
+    <div style="display:flex;align-items:center;gap:0.5rem;">
+        {% match municipality.coat_of_arms_ext %}
+        {% when Some with (ext) %}
+        <img src="/{{ orp.slug }}/{{ municipality.slug }}/znak-{{ municipality.slug }}.{{ ext }}" alt="Znak {{ municipality.name }}" title="Znak {{ municipality.name }}" class="header-emblem">
+        {% when None %}
+        {% endmatch %}
+        <h1>{{ municipality.name }}</h1>
+    </div>
+</div>
+{% endblock %}
+
+{% block search_placeholder %}Hledat v {{ municipality.name }}...{% endblock %}
+
+{% block header_right %}
+{% match municipality.flag_ext %}
+{% when Some with (ext) %}
+<div class="context-emblem">
+    <img src="/{{ orp.slug }}/{{ municipality.slug }}/vlajka-{{ municipality.slug }}.{{ ext }}" alt="Vlajka {{ municipality.name }}" title="Vlajka {{ municipality.name }}" class="context-emblem-img">
+</div>
+{% when None %}
+{% endmatch %}
+{% endblock %}
+
+{% block breadcrumb %}
+<nav class="breadcrumbs" style="padding-top: 2rem; border: none; margin: 0;">
+    <a href="/">Česká republika</a> &raquo;
+    <a href="/{{ region.slug }}/">{{ region.name }}</a> &raquo;
+    <a href="/{{ orp.slug }}/">{{ orp.name }}</a> &raquo;
+    <span>{{ municipality.name }}</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<section class="info-hub">
+    <div class="content-left">
+        <div style="line-height: 1.7; color: #333;">
+            {% match photo %}
+            {% when Some with (p) %}
+            <div class="photo-inline" data-gallery-open="municipality" data-index="0" data-gallery-photos="[&quot;{{ p.url }}&quot;]">
+                <img src="{{ p.thumb_url }}" alt="{% if p.description.is_empty() %}{{ municipality.name }}{% else %}{{ p.description }}{% endif %}" loading="lazy">
+            </div>
+            {% when None %}
+            {% endmatch %}
+            <p style="margin-bottom: 0.8rem;">Obec {{ municipality.name }} patří do správního obvodu ORP {{ orp.name }}, {{ region.name }}.</p>
+        </div>
+    </div>
+    <aside class="content-right">
+        {% if !gallery_photos.is_empty() %}
+        <div class="photo-slideshow" data-slideshow="municipality-gallery" data-gallery-photos="[{% for p in gallery_photos %}{% if !loop.first %},{% endif %}&quot;{{ p.url }}&quot;{% endfor %}]" data-gallery-thumbs="[{% for p in gallery_photos %}{% if !loop.first %},{% endif %}&quot;{{ p.thumb_url }}&quot;{% endfor %}]" data-slide-start="0">
+            <img src="{{ gallery_photos[0].thumb_url }}" alt="{% if gallery_photos[0].description.is_empty() %}{{ municipality.name }}{% else %}{{ gallery_photos[0].description }}{% endif %}" loading="lazy" data-index="0">
+            <button class="slide-nav slide-prev" aria-label="Předchozí">&#8249;</button>
+            <button class="slide-nav slide-next" aria-label="Další">&#8250;</button>
+            <span class="slide-counter">1 / {{ gallery_photos.len() }}</span>
+        </div>
+        {% endif %}
+        <div id="map" style="width:100%;height:300px;border-radius:12px;margin-bottom:1rem;" data-name="{{ municipality.name }}"></div>
+        <div class="premium-infobox">
+            <div class="infobox-top">
+                <div class="infobox-title">{{ municipality.name }}</div>
+                <div class="infobox-subtitle">{{ region.name }}</div>
+            </div>
+            <div class="infobox-table">
+                {% match municipality.population %}
+                {% when Some with (pop) %}
+                <div class="row-data">
+                    <span class="label-data">Počet obyvatel</span>
+                    <span class="value-data">{{ pop }}</span>
+                </div>
+                {% when None %}
+                {% endmatch %}
+                <div class="row-data">
+                    <span class="label-data">ORP</span>
+                    <span class="value-data">{{ orp.name }}</span>
+                </div>
+                <div class="row-data">
+                    <span class="label-data">Kraj</span>
+                    <span class="value-data">{{ region.name }}</span>
+                </div>
+                <div class="row-data">
+                    <span class="label-data">Kód obce</span>
+                    <span class="value-data">{{ municipality.municipality_code }}</span>
+                </div>
+            </div>
+            <div style="padding: 0.75rem 1.25rem; display: flex; flex-direction: column; gap: 0.4rem;">
+                {% match municipality.wikipedia_url %}
+                {% when Some with (url) %}
+                <a href="{{ url }}" target="_blank" rel="noopener" style="color: var(--color-link); font-size: 0.9rem;">Wikipedia</a>
+                {% when None %}
+                {% endmatch %}
+                {% match municipality.official_website %}
+                {% when Some with (url) %}
+                <a href="{{ url }}" target="_blank" rel="noopener" style="color: var(--color-link); font-size: 0.9rem;">Oficiální web</a>
+                {% when None %}
+                {% endmatch %}
+            </div>
+        </div>
+    </aside>
+</section>
+
+{% if !landmarks.is_empty() %}
+<section class="active-hub" style="padding-top: 0;">
+    <div class="active-left">
+        <h3 class="section-title" style="font-size: 1.3rem;">Památky v obci {{ municipality.name }}</h3>
+        <div style="margin-top: 0.5rem;">
+            {% for l in landmarks %}
+            <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--color-gray-border);">
+                <a href="/{{ orp.slug }}/{{ municipality.slug }}/{{ l.slug }}/" style="color: var(--color-link); font-weight: 500;">{{ l.name }}</a>
+                <span style="color: #888; font-size: 0.85rem; margin-left: 0.5rem;">{{ l.type_name }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+    var lat = {{ municipality.latitude.unwrap_or(49.8) }};
+    var lon = {{ municipality.longitude.unwrap_or(15.5) }};
+    var muniCode = '{{ municipality.municipality_code }}';
+
+    var map = L.map('map', {scrollWheelZoom: false}).setView([lat, lon], 13);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+    }).addTo(map);
+
+    fetch('/api/geojson/municipality/' + muniCode)
+        .then(function(r){ if (!r.ok) throw new Error('GeoJSON not found'); return r.json(); })
+        .then(function(data){
+            var layer = L.geoJSON(data, {
+                style: {color: '#d62728', weight: 2.5, fillColor: '#d62728', fillOpacity: 0.12}
+            }).addTo(map);
+            map.fitBounds(layer.getBounds());
+        });
+})();
+</script>
+{% endblock %}

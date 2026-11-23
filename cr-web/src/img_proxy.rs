@@ -1,0 +1,470 @@
+//! On-the-fly image resize proxy.
+//!
+//! Resizes images from a configured origin and caches the result on disk.
+//!
+//! Route: GET /img/*path?w=360
+//! Allowed widths: 360, 720. Without ?w, proxies the original.
+
+use axum::extract::{Query, State};
+use axum::http::{StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
+use image::ImageReader;
+use std::io::Cursor;
+use std::path::PathBuf;
+
+use crate::state::AppState;
+
+const ALLOWED_WIDTHS: &[u32] = &[360, 720];
+const CACHE_DIR: &str = "/tmp/cr-img-cache";
+
+#[derive(serde::Deserialize)]
+pub struct ResizeParams {
+    pub w: Option<u32>,
+}
+
+/// Handler for `/img/*` route.
+pub async fn img_proxy(
+    State(state): State<AppState>,
+    uri: Uri,
+    Query(params): Query<ResizeParams>,
+) -> Response {
+    let path = uri.path();
+
+    // Only handle /img/ paths
+    if !path.starts_with("/img/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let img_path = &path[5..]; // strip "/img/"
+    serve_image_inner(&state, img_path, params.w).await
+}
+
+/// Serve an image by path. Called from resolve_path for SEO URLs without /img/ prefix.
+pub async fn serve_image(state: &AppState, img_path: &str, width: Option<u32>) -> Response {
+    serve_image_inner(state, img_path, width).await
+}
+
+async fn serve_image_inner(
+    state: &AppState,
+    img_path: &str,
+    target_width: Option<u32>,
+) -> Response {
+    if img_path.is_empty() || img_path.contains("..") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    // Validate path: only allow safe characters and image extensions
+    let valid_path = img_path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_/.".contains(c));
+    let valid_ext = img_path.ends_with(".webp")
+        || img_path.ends_with(".jpg")
+        || img_path.ends_with(".jpeg")
+        || img_path.ends_with(".png")
+        || img_path.ends_with(".svg");
+    if !valid_path || !valid_ext {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    // SEO URL translation: /{orp}/{municipality}/{photo}.webp → municipalities/{code}/{photo}.webp
+    // Pattern: 3 path segments where first is not a known prefix
+    let img_path = resolve_seo_path(&state.db, img_path).await;
+    let img_path = img_path.as_str();
+
+    let is_svg = img_path.ends_with(".svg");
+
+    // SVGs cannot be raster-resized
+    if target_width.is_some() && is_svg {
+        return (StatusCode::BAD_REQUEST, "SVG resize not supported").into_response();
+    }
+
+    // Validate requested width
+    if let Some(w) = target_width
+        && !ALLOWED_WIDTHS.contains(&w)
+    {
+        return (StatusCode::BAD_REQUEST, "Allowed widths: 360, 720").into_response();
+    }
+
+    // Build cache key
+    let cache_path = match target_width {
+        Some(w) => {
+            let dir = PathBuf::from(CACHE_DIR).join(format!("{w}"));
+            dir.join(img_path)
+        }
+        None => PathBuf::from(CACHE_DIR).join("orig").join(img_path),
+    };
+
+    // Serve from disk cache if available
+    if cache_path.exists()
+        && let Ok(data) = tokio::fs::read(&cache_path).await
+    {
+        let content_type = content_type_for(img_path, target_width.is_some());
+
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, content_type),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=86400, s-maxage=604800",
+                ),
+            ],
+            data,
+        )
+            .into_response();
+    }
+
+    if state.image_base_url.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let upstream_url = format!(
+        "{}/img/{img_path}",
+        state.image_base_url.trim_end_matches('/')
+    );
+
+    let resp = match state
+        .http_client
+        .get(&upstream_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to fetch upstream image {upstream_url}: {e}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+
+    if !resp.status().is_success() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let original_bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("Failed to read image bytes: {e}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+
+    // If no resize requested, cache and return original
+    // When resizing: always encode as JPEG (lossy, quality 82) because the image crate's
+    // WebP encoder only supports lossless VP8L, which produces larger files than originals.
+    let (output_bytes, is_resized) = if let Some(w) = target_width {
+        // Decode and resize
+        let reader = match ImageReader::new(Cursor::new(&original_bytes)).with_guessed_format() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to guess image format: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        let img = match reader.decode() {
+            Ok(img) => img,
+            Err(e) => {
+                tracing::error!("Failed to decode image: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        let orig_w = img.width();
+        if orig_w <= w {
+            // Already small enough, return original as-is
+            (original_bytes.to_vec(), false)
+        } else {
+            let resized = img.resize(w, u32::MAX, image::imageops::FilterType::Lanczos3);
+
+            // Encode as JPEG with quality 82 (lossy, much smaller than lossless WebP)
+            let mut buf = Vec::new();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 82);
+            if let Err(e) = resized.write_with_encoder(encoder) {
+                tracing::error!("Failed to encode resized JPEG: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+
+            (buf, true)
+        }
+    } else {
+        (original_bytes.to_vec(), false)
+    };
+
+    // Save to disk cache (async, don't block response)
+    let cache_path_clone = cache_path.clone();
+    let output_clone = output_bytes.clone();
+    tokio::spawn(async move {
+        if let Some(parent) = cache_path_clone.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&cache_path_clone, &output_clone).await;
+    });
+
+    let content_type = content_type_for(img_path, is_resized);
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=86400, s-maxage=604800",
+            ),
+        ],
+        output_bytes,
+    )
+        .into_response()
+}
+
+/// Determine Content-Type from file extension. Resized images are always JPEG.
+fn content_type_for(path: &str, is_resized: bool) -> &'static str {
+    if is_resized {
+        "image/jpeg"
+    } else if path.ends_with(".webp") {
+        "image/webp"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Translate SEO-friendly image paths to R2 storage paths.
+///
+/// Supported patterns:
+/// - 1 segment: `{region-slug}.webp` → `regions/{region-slug}.webp`
+/// - 2 segments: `{orp}/{slug}.webp` → landmark (primary) or municipality photo
+/// - 3 segments: `{orp}/{municipality}/{slug}.webp` → landmark or municipality photo
+/// - 4 segments: `{orp}/{municipality}/{landmark}/{photo-slug}.webp` → landmark_photos (index 2+)
+///
+/// Known prefixes (municipalities/, landmarks/, pools/, regions/) pass through unchanged.
+async fn resolve_seo_path(db: &sqlx::PgPool, path: &str) -> String {
+    let known_prefixes = ["municipalities/", "landmarks/", "pools/", "regions/"];
+    if known_prefixes.iter().any(|p| path.starts_with(p)) {
+        return path.to_string();
+    }
+
+    let segments: Vec<&str> = path.split('/').collect();
+
+    match segments.len() {
+        // 1 segment: {region-slug}.webp → regions/{region-slug}.webp
+        1 => {
+            let file = segments[0];
+            let slug = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM regions WHERE slug = $1)",
+            )
+            .bind(slug)
+            .fetch_one(db)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("DB error resolving 1-seg region path '{path}': {e}");
+                false
+            });
+            if exists {
+                return format!("regions/{file}");
+            }
+            path.to_string()
+        }
+        // 4 segments: {orp}/{municipality}/{landmark-slug}/{photo-slug}.webp
+        // → landmark_photos r2_key
+        4 => {
+            let orp_slug = segments[0];
+            let muni_slug = segments[1];
+            let landmark_slug = segments[2];
+            let photo_file = segments[3];
+            let photo_slug = photo_file
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(photo_file);
+
+            let r2_key = sqlx::query_scalar::<_, String>(
+                "SELECT lp.r2_key FROM landmark_photos lp \
+                 JOIN landmarks l ON l.npu_catalog_id = lp.npu_catalog_id \
+                 JOIN municipalities m ON l.municipality_id = m.id \
+                 JOIN orp o ON m.orp_id = o.id \
+                 WHERE o.slug = $1 AND m.slug = $2 AND l.slug = $3 AND lp.slug = $4",
+            )
+            .bind(orp_slug)
+            .bind(muni_slug)
+            .bind(landmark_slug)
+            .bind(photo_slug)
+            .fetch_optional(db)
+            .await;
+
+            match r2_key {
+                Ok(Some(key)) if !key.contains("..") => key,
+                Ok(_) => path.to_string(),
+                Err(e) => {
+                    tracing::error!("DB error resolving 4-seg SEO path '{path}': {e}");
+                    path.to_string()
+                }
+            }
+        }
+        // 2 or 3 segments: existing logic
+        2 | 3 => {
+            let (orp_slug, muni_slug, file_with_ext) = if segments.len() == 2 {
+                (segments[0], segments[0], segments[1])
+            } else {
+                (segments[0], segments[1], segments[2])
+            };
+
+            // Check for coat-of-arms/flag SEO URLs: znak-{slug}.ext or vlajka-{slug}.ext
+            if let Some(r2_path) = resolve_coat_flag(db, &segments, file_with_ext, path).await {
+                return r2_path;
+            }
+
+            let slug = file_with_ext
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(file_with_ext);
+
+            #[derive(sqlx::FromRow)]
+            struct SeoLookup {
+                municipality_code: String,
+                landmark_r2_key: Option<String>,
+            }
+
+            let lookup = sqlx::query_as::<_, SeoLookup>(
+                "SELECT m.municipality_code, \
+                 (SELECT pm.r2_key FROM photo_metadata pm \
+                  JOIN landmarks l ON pm.entity_type = 'landmark' AND pm.entity_id = l.id \
+                  WHERE l.municipality_id = m.id AND l.slug = $3 AND pm.photo_index = 1 \
+                  LIMIT 1) as landmark_r2_key \
+                 FROM municipalities m \
+                 JOIN orp o ON m.orp_id = o.id \
+                 WHERE o.slug = $1 AND m.slug = $2",
+            )
+            .bind(orp_slug)
+            .bind(muni_slug)
+            .bind(slug)
+            .fetch_optional(db)
+            .await;
+
+            match lookup {
+                Ok(Some(row)) => {
+                    if let Some(r2_key) = row.landmark_r2_key.filter(|k| !k.contains("..")) {
+                        return r2_key;
+                    }
+                    format!("municipalities/{}/{file_with_ext}", row.municipality_code)
+                }
+                Ok(None) if segments.len() == 3 => {
+                    // 3 segments but middle is not a municipality — try as landmark photo:
+                    // /{orp}/{landmark-slug}/{photo-slug}.webp (main municipality)
+                    let lm_slug = segments[1];
+                    let lp_slug = file_with_ext
+                        .rsplit_once('.')
+                        .map(|(s, _)| s)
+                        .unwrap_or(file_with_ext);
+                    let lp_r2 = sqlx::query_scalar::<_, String>(
+                        "SELECT lp.r2_key FROM landmark_photos lp \
+                         JOIN landmarks l ON l.npu_catalog_id = lp.npu_catalog_id \
+                         JOIN municipalities m ON l.municipality_id = m.id \
+                         JOIN orp o ON m.orp_id = o.id \
+                         WHERE o.slug = $1 AND m.slug = $1 AND l.slug = $2 AND lp.slug = $3",
+                    )
+                    .bind(orp_slug)
+                    .bind(lm_slug)
+                    .bind(lp_slug)
+                    .fetch_optional(db)
+                    .await;
+                    match lp_r2 {
+                        Ok(Some(key)) if !key.contains("..") => key,
+                        Ok(_) => path.to_string(),
+                        Err(e) => {
+                            tracing::error!("DB error resolving 3-seg landmark path '{path}': {e}");
+                            path.to_string()
+                        }
+                    }
+                }
+                Ok(None) => path.to_string(),
+                Err(e) => {
+                    tracing::error!("DB error resolving SEO path '{path}': {e}");
+                    path.to_string()
+                }
+            }
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// Resolve coat-of-arms/flag SEO URLs to R2 keys.
+///
+/// Patterns:
+/// - 2 seg: `/{slug}/znak-{slug}.ext` → region or ORP main municipality
+/// - 3 seg: `/{orp}/{muni}/znak-{muni}.ext` → municipality
+async fn resolve_coat_flag(
+    db: &sqlx::PgPool,
+    segments: &[&str],
+    file_with_ext: &str,
+    path: &str,
+) -> Option<String> {
+    let (file_stem, ext) = file_with_ext.rsplit_once('.')?;
+    let image_type = if file_stem.starts_with("znak-") {
+        "coat-of-arms"
+    } else if file_stem.starts_with("vlajka-") {
+        "flag"
+    } else {
+        return None;
+    };
+
+    if segments.len() == 2 {
+        // Try region first: /jihomoravsky-kraj/znak-jihomoravsky-kraj.svg
+        let region_code =
+            sqlx::query_scalar::<_, String>("SELECT region_code FROM regions WHERE slug = $1")
+                .bind(segments[0])
+                .fetch_optional(db)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("DB error resolving coat/flag region '{path}': {e}");
+                    None
+                });
+
+        if let Some(code) = region_code {
+            return Some(format!("regions/{code}/{image_type}.{ext}"));
+        }
+
+        // Try ORP (main municipality): /benesov/znak-benesov.svg
+        let muni_code = sqlx::query_scalar::<_, String>(
+            "SELECT m.municipality_code FROM municipalities m \
+             JOIN orp o ON m.orp_id = o.id \
+             WHERE o.slug = $1 AND m.slug = $1",
+        )
+        .bind(segments[0])
+        .fetch_optional(db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("DB error resolving coat/flag ORP '{path}': {e}");
+            None
+        });
+
+        if let Some(code) = muni_code {
+            return Some(format!("municipalities/{code}/{image_type}.{ext}"));
+        }
+    } else {
+        // 3 segments: /votice/olbramovice/znak-olbramovice.webp
+        let muni_code = sqlx::query_scalar::<_, String>(
+            "SELECT m.municipality_code FROM municipalities m \
+             JOIN orp o ON m.orp_id = o.id \
+             WHERE o.slug = $1 AND m.slug = $2",
+        )
+        .bind(segments[0])
+        .bind(segments[1])
+        .fetch_optional(db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("DB error resolving coat/flag municipality '{path}': {e}");
+            None
+        });
+
+        if let Some(code) = muni_code {
+            return Some(format!("municipalities/{code}/{image_type}.{ext}"));
+        }
+    }
+
+    None
+}

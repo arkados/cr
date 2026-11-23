@@ -1,0 +1,64 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Wrangler local state
+.wrangler/
+
+# GeoJSON source data (large raw files)
+data/geojson/*_wgs84.geojson
+# Note: *_simple.geojson files ARE committed — they're needed on production for map polygons
+
+# Playwright screenshots
+.playwright-mcp/
+*.png
+# …but DO commit Open Graph / share / static images that live in
+# the public static dir — they need to be deployed by CI.
+!cr-web/static/img/*.png
+!cr-web/static/img/**/*.png
+
+# AI agent skills
+.agents/
+.agent/
+.claude/
+.cline/
+.goose/
+data/wikidata_municipalities.json
+data/images/
+data/scripts/__pycache__/
+data/npu/*.csv
+data/prototypes/
+data/scripts/
+data/sledujteto/
+data/imdb-cache/
+# csfd_id resolver output — large per-row TSV with embedded JSON candidates.
+# Not source code; regenerable by re-running the scripts. Keep out of git.
+data/csfd-cswiki/
+data/csfd-search/
+scripts/__pycache__/
+scripts/auto_import/__pycache__/
